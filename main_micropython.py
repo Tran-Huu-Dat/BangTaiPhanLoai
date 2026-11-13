@@ -7,6 +7,10 @@ Ket noi:
   - ToF 2 (VL53L0X): I2C1 (SDA=GP2, SCL=GP3)
   - Solenoid 1     : GP10 (L298N IN1)
   - Solenoid 2     : GP11 (L298N IN3)
+  - L298N: IN2/IN4 noi GND, ENA/ENB bat, GND chung voi Pico.
+
+Phan loai: Tram 1 size M 65-75mm, Tram 2 size L 50-60mm.
+Ca hai kich 500ms roi nha; size S va mat bang tai 85-90mm di qua.
 """
 
 import time
@@ -94,6 +98,10 @@ except:
     led = Pin(25, Pin.OUT)
 
 # ======================= DINH NGHIA TRAM =======================
+BELT_CLEAR_MIN_MM = 80
+DEBOUNCE_COUNT = 2
+CLEAR_COUNT = 2
+
 class Station:
     MODE_PULSE = 0   # Hut trong khoang thoi gian roi nha
     MODE_HOLD  = 1   # Hut giu cho den khi vat di qua
@@ -102,12 +110,13 @@ class Station:
     STATE_ACTIVE     = 1
     STATE_WAIT_CLEAR = 2
 
-    def __init__(self, name, i2c_bus, sol_pin, mode, threshold_mm, on_time_ms):
+    def __init__(self, name, i2c_bus, sol_pin, mode, min_mm, max_mm, on_time_ms):
         self.name = name
         self.i2c = i2c_bus
         self.sol_pin = sol_pin
         self.mode = mode
-        self.threshold_mm = threshold_mm
+        self.min_mm = min_mm
+        self.max_mm = max_mm
         self.on_time_ms = on_time_ms
 
         self.sensor = None
@@ -116,6 +125,7 @@ class Station:
         self.state = self.STATE_IDLE
         self.state_start_ms = 0
         self.hit_count = 0
+        self.clear_count = 0
         self.last_retry_ms = 0
         self.total_sorted = 0
 
@@ -126,6 +136,8 @@ class Station:
         try:
             self.sensor = VL53L0X(self.i2c)
             self.sensor_ok = True
+            self.hit_count = 0
+            self.clear_count = 0
             print("[{}] VL53L0X khoi tao THANH CONG".format(self.name))
         except Exception as e:
             self.sensor_ok = False
@@ -153,20 +165,26 @@ class Station:
         if self.sensor.is_data_ready():
             d = self.sensor.read_distance_mm()
             self.distance_mm = d
-            if d < self.threshold_mm and d < 8000:
+            valid = 0 < d < 8000
+            if valid and self.min_mm <= d <= self.max_mm:
                 self.hit_count = min(self.hit_count + 1, 10)
             else:
                 self.hit_count = 0
 
-        object_present = self.hit_count >= 2
-        object_gone = self.distance_mm >= (self.threshold_mm + 20)  # Hysteresis 20mm
+            if valid and d >= BELT_CLEAR_MIN_MM:
+                self.clear_count = min(self.clear_count + 1, 10)
+            else:
+                self.clear_count = 0
+
+        object_present = self.hit_count >= DEBOUNCE_COUNT
+        object_gone = self.clear_count >= CLEAR_COUNT
         elapsed = time.ticks_diff(now, self.state_start_ms)
 
         # 3. May trang thai
         if self.state == self.STATE_IDLE:
             if object_present:
-                print("[{}] PHAT HIEN VAT: d={} mm (< {} mm)".format(
-                    self.name, self.distance_mm, self.threshold_mm
+                print("[{}] PHAT HIEN VAT: d={} mm (size {}-{} mm)".format(
+                    self.name, self.distance_mm, self.min_mm, self.max_mm
                 ))
                 self.set_solenoid(True)
                 self.state = self.STATE_ACTIVE
@@ -198,8 +216,8 @@ class Station:
                 self.hit_count = 0
 
 # Khoi tao 2 tram doc lap
-station1 = Station("TRAM1", i2c0, sol1_pin, Station.MODE_PULSE, threshold_mm=150, on_time_ms=2000)
-station2 = Station("TRAM2", i2c1, sol2_pin, Station.MODE_HOLD,  threshold_mm=200, on_time_ms=5000)
+station1 = Station("TRAM1", i2c0, sol1_pin, Station.MODE_PULSE, min_mm=65, max_mm=75, on_time_ms=500)
+station2 = Station("TRAM2", i2c1, sol2_pin, Station.MODE_PULSE, min_mm=50, max_mm=60, on_time_ms=500)
 
 print("\n===== HE THONG BANG TAI KHOI DONG THANH CONG =====")
 

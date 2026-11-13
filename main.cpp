@@ -10,8 +10,10 @@
  *
  *  Logic:
  *    - 2 tram chay DOC LAP va DONG THOI, khong chan CPU (Non-blocking).
- *    - Tram 1 (MODE_PULSE): vat < 150mm -> hut Solenoid 1 trong 2s roi nha.
- *    - Tram 2 (MODE_HOLD) : vat < 200mm -> hut Solenoid 2 cho den khi vat qua.
+ *    - Tram 1: size M, 65-75mm -> kich Solenoid 1 trong 500ms roi nha.
+ *    - Tram 2: size L, 50-60mm -> kich Solenoid 2 trong 500ms roi nha.
+ *    - Size S di qua; mat bang tai 85-90mm khong kich solenoid.
+ *    - L298N: IN2/IN4 noi GND, ENA/ENB bat, GND chung voi Pico.
  *    - Co bo dem san pham phan loai, loc nhieu (debounce), chong hut lap.
  * =====================================================================
  */
@@ -36,8 +38,9 @@
 #define I2C_BAUDRATE    (400 * 1000)   // 400 kHz
 
 // ======================= THAM SO HE THONG =======================
-#define HYSTERESIS_MM       20     // Do tre (mm) chong rung Solenoid
-#define DEBOUNCE_COUNT      2      // So mau lien tiep < nguong de xac nhan co vat
+#define BELT_CLEAR_MIN_MM   80     // Mat bang tai 85-90mm; >= 80mm moi cho nhan phoi tiep
+#define DEBOUNCE_COUNT      2      // So mau lien tiep trong khoang size de xac nhan phoi
+#define CLEAR_COUNT         2      // So mau lien tiep thay mat bang tai de chong kich lap
 #define SENSOR_RETRY_MS     2500   // Thu khoi tao lai cam bien neu mat ket noi
 #define SENSOR_TIMEOUT_MS   800    // Timeout tin hieu cam bien
 #define PRINT_PERIOD_MS     250    // Chu ky in log ra Serial Monitor
@@ -62,7 +65,7 @@ struct Station {
     i2c_inst_t   *i2c;
     uint          sda_pin, scl_pin, sol_pin;
     StationMode   mode;
-    uint16_t      threshold_mm;    // Nguong phat hien vat (mm)
+    uint16_t      min_mm, max_mm;  // Khoang cach nhan size, bao gom hai dau mut (mm)
     uint32_t      travel_delay_ms; // Thoi gian vat chay tu cam bien -> tay gat (0 = gat ngay)
     uint32_t      on_time_ms;      // Thoi gian Solenoid hut (ms)
 
@@ -74,6 +77,7 @@ struct Station {
     uint32_t      last_data_ms;
     uint32_t      last_retry_ms;
     uint8_t       hit_count;
+    uint8_t       clear_count;
     StationState  state;
     uint32_t      state_start_ms;
     uint32_t      total_count;
@@ -89,11 +93,12 @@ static VL53L1X tof1(TOF1_I2C);
 static VL53L1X tof2(TOF2_I2C);
 
 // Cấu hình 2 trạm:
-// Trạm 1: Ngưỡng < 150mm (15cm), trễ di chuyển 0ms, hút 2000ms rồi nhả (MODE_PULSE)
-// Trạm 2: Ngưỡng < 200mm (20cm), trễ di chuyển 0ms, hút đến khi vật qua / max 5000ms (MODE_HOLD)
+// Trạm 1: size M 65-75mm, kích ngay tại trạm trong 500ms rồi nhả.
+// Trạm 2: size L 50-60mm, kích ngay tại trạm trong 500ms rồi nhả.
+// Size S nằm ngoài hai khoảng này nên đi qua cả hai trạm.
 static Station stations[2] = {
-    { "TRAM1", TOF1_I2C, TOF1_SDA_PIN, TOF1_SCL_PIN, SOL1_PIN, MODE_PULSE, 150, 0, 2000, &tof1 },
-    { "TRAM2", TOF2_I2C, TOF2_SDA_PIN, TOF2_SCL_PIN, SOL2_PIN, MODE_HOLD,  200, 0, 5000, &tof2 },
+    { "TRAM1", TOF1_I2C, TOF1_SDA_PIN, TOF1_SCL_PIN, SOL1_PIN, MODE_PULSE, 65, 75, 0, 500, &tof1 },
+    { "TRAM2", TOF2_I2C, TOF2_SDA_PIN, TOF2_SCL_PIN, SOL2_PIN, MODE_PULSE, 50, 60, 0, 500, &tof2 },
 };
 
 // ======================= TIEN ICH =======================
@@ -162,6 +167,8 @@ static bool tofInit(Station &s) {
     s.tof->startContinuous(40);                   // Do lien tuc chu ky 40ms
     s.sensor_ok        = true;
     s.has_valid_target = false;
+    s.hit_count        = 0;
+    s.clear_count      = 0;
     s.last_data_ms     = millis();
     printf("[%s] VL53L1X khoi tao THANH CONG!\n", s.name);
     return true;
@@ -213,19 +220,27 @@ static void stationUpdate(Station &s) {
 
     // 2. Doc cam bien & loc nhieu (debounce)
     if (tofRead(s)) {
-        bool below = s.has_valid_target && (s.distance_mm < s.threshold_mm);
-        if (below) { if (s.hit_count < 255) s.hit_count++; }
+        bool matches_size = s.has_valid_target &&
+                            s.distance_mm >= s.min_mm && s.distance_mm <= s.max_mm;
+        if (matches_size) { if (s.hit_count < 255) s.hit_count++; }
         else       { s.hit_count = 0; }
+
+        // Chi phep nhan phoi moi khi thay mat bang tai, khong dung mau loi de mo khoa.
+        if (s.has_valid_target && s.distance_mm >= BELT_CLEAR_MIN_MM) {
+            if (s.clear_count < 255) s.clear_count++;
+        } else {
+            s.clear_count = 0;
+        }
     }
 
     bool object_detected = (s.hit_count >= DEBOUNCE_COUNT);
-    bool object_cleared  = !s.has_valid_target || (s.distance_mm >= s.threshold_mm + HYSTERESIS_MM);
+    bool object_cleared  = (s.clear_count >= CLEAR_COUNT);
 
     // 3. Phat hien vat moi -> dua vao hang doi (Queue)
     if (s.state == ST_IDLE && object_detected) {
         s.total_count++;
-        printf("[%s] PHAT HIEN VAT #%lu: d=%u mm (< %u mm)\n",
-               s.name, (unsigned long)s.total_count, s.distance_mm, s.threshold_mm);
+        printf("[%s] PHAT HIEN VAT #%lu: d=%u mm (size %u-%u mm)\n",
+               s.name, (unsigned long)s.total_count, s.distance_mm, s.min_mm, s.max_mm);
 
         if (s.travel_delay_ms == 0) {
             solenoidSet(s, true);
