@@ -62,3 +62,9 @@ target_link_libraries(BangTaiPhanLoai
 
 pico_add_extra_outputs(BangTaiPhanLoai)
 
+add_executable(TestToF test.cpp vl53l1x.cpp)
+target_link_libraries(TestToF PRIVATE pico_stdlib hardware_i2c)
+pico_enable_stdio_uart(TestToF 0)
+pico_enable_stdio_usb(TestToF 1)
+pico_add_extra_outputs(TestToF)
+

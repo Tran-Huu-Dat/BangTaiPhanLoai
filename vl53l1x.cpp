@@ -3,7 +3,6 @@
  */
 #include "vl53l1x.h"
 #include "pico/stdlib.h"
-#include <stdio.h>
 
 static const uint32_t I2C_TIMEOUT_US = 15000;
 
@@ -116,9 +115,20 @@ VL53L1X::VL53L1X(i2c_inst_t *i2c_inst, uint8_t addr)
     ranging_data.range_status = 255;
 }
 
+bool VL53L1X::checkTransfer(int result, int expected, uint16_t reg, const char *operation) {
+    if (result == expected) return true;
+    if (!i2c_error) {
+        init_diagnostic.i2c_operation = operation;
+        init_diagnostic.i2c_register = reg;
+        init_diagnostic.i2c_result = result;
+    }
+    i2c_error = true;
+    return false;
+}
+
 void VL53L1X::writeReg(uint16_t reg, uint8_t val) {
     uint8_t buf[3] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF), val };
-    if (i2c_write_timeout_us(i2c, address, buf, 3, false, I2C_TIMEOUT_US) != 3) i2c_error = true;
+    checkTransfer(i2c_write_timeout_us(i2c, address, buf, 3, false, I2C_TIMEOUT_US), 3, reg, "WRITE");
 }
 
 void VL53L1X::writeReg16Bit(uint16_t reg, uint16_t val) {
@@ -126,7 +136,7 @@ void VL53L1X::writeReg16Bit(uint16_t reg, uint16_t val) {
         (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF),
         (uint8_t)(val >> 8), (uint8_t)(val & 0xFF)
     };
-    if (i2c_write_timeout_us(i2c, address, buf, 4, false, I2C_TIMEOUT_US) != 4) i2c_error = true;
+    checkTransfer(i2c_write_timeout_us(i2c, address, buf, 4, false, I2C_TIMEOUT_US), 4, reg, "WRITE");
 }
 
 void VL53L1X::writeReg32Bit(uint16_t reg, uint32_t val) {
@@ -135,7 +145,7 @@ void VL53L1X::writeReg32Bit(uint16_t reg, uint32_t val) {
         (uint8_t)(val >> 24), (uint8_t)(val >> 16),
         (uint8_t)(val >> 8), (uint8_t)(val & 0xFF)
     };
-    if (i2c_write_timeout_us(i2c, address, buf, 6, false, I2C_TIMEOUT_US) != 6) i2c_error = true;
+    checkTransfer(i2c_write_timeout_us(i2c, address, buf, 6, false, I2C_TIMEOUT_US), 6, reg, "WRITE");
 }
 
 void VL53L1X::writeMulti(uint16_t reg, const uint8_t *src, uint16_t count) {
@@ -144,32 +154,33 @@ void VL53L1X::writeMulti(uint16_t reg, const uint8_t *src, uint16_t count) {
     buf[0] = (uint8_t)(reg >> 8);
     buf[1] = (uint8_t)(reg & 0xFF);
     for (uint16_t i = 0; i < count; i++) buf[2 + i] = src[i];
-    if (i2c_write_timeout_us(i2c, address, buf, count + 2, false, I2C_TIMEOUT_US * 2) != (int)(count + 2)) {
-        i2c_error = true;
-    }
+    int result = i2c_write_timeout_us(i2c, address, buf, count + 2, false, I2C_TIMEOUT_US * 2);
+    checkTransfer(result, count + 2, reg, "WRITE");
+}
+
+bool VL53L1X::readRegister(uint16_t reg, uint8_t *data, uint8_t count) {
+    uint8_t reg_buf[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
+    int result = i2c_write_timeout_us(i2c, address, reg_buf, 2, true, I2C_TIMEOUT_US);
+    if (!checkTransfer(result, 2, reg, "SELECT_REG")) return false;
+    result = i2c_read_timeout_us(i2c, address, data, count, false, I2C_TIMEOUT_US);
+    return checkTransfer(result, count, reg, "READ");
 }
 
 uint8_t VL53L1X::readReg(uint16_t reg) {
-    uint8_t reg_buf[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
-    uint8_t val = 0xFF;
-    if (i2c_write_timeout_us(i2c, address, reg_buf, 2, true, I2C_TIMEOUT_US) != 2) { i2c_error = true; return 0xFF; }
-    if (i2c_read_timeout_us(i2c, address, &val, 1, false, I2C_TIMEOUT_US) != 1) { i2c_error = true; return 0xFF; }
+    uint8_t val;
+    if (!readRegister(reg, &val, 1)) return 0xFF;
     return val;
 }
 
 uint16_t VL53L1X::readReg16Bit(uint16_t reg) {
-    uint8_t reg_buf[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
-    uint8_t val[2] = { 0, 0 };
-    if (i2c_write_timeout_us(i2c, address, reg_buf, 2, true, I2C_TIMEOUT_US) != 2) { i2c_error = true; return 0; }
-    if (i2c_read_timeout_us(i2c, address, val, 2, false, I2C_TIMEOUT_US) != 2) { i2c_error = true; return 0; }
+    uint8_t val[2];
+    if (!readRegister(reg, val, 2)) return 0;
     return (uint16_t)((val[0] << 8) | val[1]);
 }
 
 uint32_t VL53L1X::readReg32Bit(uint16_t reg) {
-    uint8_t reg_buf[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
-    uint8_t val[4] = { 0 };
-    if (i2c_write_timeout_us(i2c, address, reg_buf, 2, true, I2C_TIMEOUT_US) != 2) { i2c_error = true; return 0; }
-    if (i2c_read_timeout_us(i2c, address, val, 4, false, I2C_TIMEOUT_US) != 4) { i2c_error = true; return 0; }
+    uint8_t val[4];
+    if (!readRegister(reg, val, 4)) return 0;
     return ((uint32_t)val[0] << 24) | ((uint32_t)val[1] << 16) | ((uint32_t)val[2] << 8) | val[3];
 }
 
@@ -189,15 +200,17 @@ bool VL53L1X::dataReady() {
 bool VL53L1X::init(bool io_2v8) {
     (void)io_2v8;
     i2c_error = false;
+    init_diagnostic = {};
 
     // 1. Kiem tra Model ID (0x010F -> 0xEBAA hoac 0xEACC)
-    uint16_t model_info = readReg16Bit(0x010F);
-    uint8_t model_id = model_info >> 8;
+    init_diagnostic.model_id = readReg16Bit(0x010F);
+    uint8_t model_id = init_diagnostic.model_id >> 8;
     if (model_id != 0xEB && model_id != 0xEA) {
         return false;
     }
 
     // 2. Soft reset de dam bao trang thai sach
+    init_diagnostic.stage = "BOOT";
     writeReg(0x0000, 0x00);
     sleep_ms(2);
     writeReg(0x0000, 0x01);
@@ -206,7 +219,8 @@ bool VL53L1X::init(bool io_2v8) {
     // 3. Cho chip boot xong (FIRMWARE_SYSTEM_STATUS 0x00E5 == 0x03)
     bool booted = false;
     for (int i = 0; i < 500; i++) {
-        if (readReg(0x00E5) == 0x03) {
+        init_diagnostic.boot_status = readReg(0x00E5);
+        if (init_diagnostic.boot_status == 0x03) {
             booted = true;
             break;
         }
@@ -215,6 +229,7 @@ bool VL53L1X::init(bool io_2v8) {
     if (!booted) return false;
 
     // 4. Nap bang 91 byte cau hinh vao 0x002D
+    if (!i2c_error) init_diagnostic.stage = "FIRST_MEASUREMENT";
     writeMulti(0x002D, VL53L4CD_INIT_SEQ, 91);
 
     // 5. Chay VHV calibration (start_vhv)
@@ -229,6 +244,7 @@ bool VL53L1X::init(bool io_2v8) {
     }
     if (!ready) return false;
 
+    if (!i2c_error) init_diagnostic.stage = "CONFIG";
     clearInterrupt();
     stopContinuous();
 
