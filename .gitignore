@@ -1,3 +1,5 @@
 build
 !.vscode/*
-docs
+/docs/*
+!/docs/debug-cam-bien.md
+!/docs/conflicts-and-bugs.md
