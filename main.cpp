@@ -22,6 +22,7 @@
 #include "hardware/i2c.h"
 #include "pico/cyw43_arch.h"
 #include "vl53l1x.h"
+#include "belt_speed.h"
 
 // ======================= CAU HINH CHAN =======================
 #define TOF1_I2C        i2c0
@@ -100,6 +101,14 @@ static VL53L1X tof2(TOF2_I2C);
 static Station stations[2] = {
     { "TRAM1", TOF1_I2C, TOF1_SDA_PIN, TOF1_SCL_PIN, SOL1_PIN, MODE_PULSE, 65, 75, 0, 500, &tof1 },
     { "TRAM2", TOF2_I2C, TOF2_SDA_PIN, TOF2_SCL_PIN, SOL2_PIN, MODE_PULSE, 50, 60, 0, 500, &tof2 },
+};
+
+// Physical belt: 85-90 mm empty, M at 65-75 mm, L at 50-60 mm.
+// No calibrated effective part lengths or motor PWM/voltage inputs yet.
+static const SpeedConfig speed_config{
+    300, {{{88, 1, 0}, {88, 1, 0}}}, 4, 12, 25,
+    {}, {}, 0, 0, 0, 3, 30000,
+    std::array<uint16_t, 2>{stations[1].min_mm, stations[1].max_mm}
 };
 
 // ======================= TIEN ICH =======================
@@ -220,7 +229,7 @@ static bool tofRead(Station &s) {
 // =====================================================================
 //                       LOGIC MOI TRAM (STATE MACHINE)
 // =====================================================================
-static void stationUpdate(Station &s) {
+static std::optional<uint16_t> stationUpdate(Station &s) {
     uint32_t now = millis();
 
     // 1. Kiem tra ket noi cam bien
@@ -230,11 +239,12 @@ static void stationUpdate(Station &s) {
             s.state = ST_IDLE;
         }
         if (now - s.last_retry_ms > SENSOR_RETRY_MS) tofInit(s);
-        return;
+        return {};
     }
 
     // 2. Doc cam bien & loc nhieu (debounce)
-    if (tofRead(s)) {
+    const bool fresh = tofRead(s);
+    if (fresh) {
         bool matches_size = s.has_valid_target &&
                             s.distance_mm >= s.min_mm && s.distance_mm <= s.max_mm;
         if (matches_size) { if (s.hit_count < 255) s.hit_count++; }
@@ -310,6 +320,8 @@ static void stationUpdate(Station &s) {
             s.hit_count = 0;
         }
     }
+    if (!fresh) return {};
+    return s.has_valid_target ? s.distance_mm : 0;
 }
 
 // =====================================================================
@@ -334,7 +346,7 @@ static const char *sensorErrorName(const Station &s) {
     return s.sensor_initialized ? "MAT_DU_LIEU" : "LOI_KHOI_TAO";
 }
 
-static void printStatus() {
+static void printStatus(const std::optional<BeltSpeedMonitor> &monitor) {
     for (int i = 0; i < 2; i++) {
         Station &s = stations[i];
         if (!s.sensor_ok) {
@@ -344,6 +356,12 @@ static void printStatus() {
         } else {
             printf("%s: d=%4umm [%-8s | #%2lu] ", s.name, s.distance_mm, stateName(s.state), (unsigned long)s.total_count);
         }
+    }
+    if (monitor && monitor->speedMmPerSecond()) {
+        printf("| v_mm_s=%.1f", *monitor->speedMmPerSecond());
+        if (auto age = monitor->pairAgeMs()) printf(" | v_age_s=%.1f", *age / 1000.0);
+    } else {
+        printf("| v_mm_s=-- (%s)", monitor ? "cho cap ToF" : "cho cam bien");
     }
     printf("\n");
 }
@@ -375,15 +393,32 @@ int main() {
 
     uint32_t last_print = 0, last_blink = 0;
     bool led_state = false;
+    std::optional<BeltSpeedMonitor> speed;
 
     while (true) {
-        stationUpdate(stations[0]);
-        stationUpdate(stations[1]);
+        for (int i = 0; i < 2; ++i) {
+            Station &s = stations[i];
+            const auto sample = stationUpdate(s);
+            if (!stations[0].sensor_ok || !stations[1].sensor_ok) {
+                speed.reset(); // Never match across a sensor outage.
+                continue;
+            }
+            if (!speed) speed.emplace(speed_config);
+            if (sample) {
+                const auto event = speed->update(s.last_data_ms, i == 0 ? sample : std::nullopt,
+                                                 i == 1 ? sample : std::nullopt);
+                if (event.pair_mm_s) {
+                    printf("[VAN TOC] Phoi %c | v_pair=%.1f mm/s\n",
+                           event.station2->size == PartSize::L ? 'L' : 'S', *event.pair_mm_s);
+                }
+            }
+        }
 
         uint32_t now = millis();
+        if (speed) speed->update(now);
         if (now - last_print >= PRINT_PERIOD_MS) {
             last_print = now;
-            printStatus();
+            printStatus(speed);
         }
         if (led_ok && now - last_blink >= 500) {
             last_blink = now;

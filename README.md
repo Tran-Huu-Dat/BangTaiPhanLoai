@@ -18,6 +18,78 @@ di chuyển. Sau khi kích, trạm phải nhận 2 mẫu hợp lệ liên tiếp
 trở lên (thấy lại mặt băng tải) mới sẵn sàng nhận phôi tiếp theo. Mẫu lỗi
 không mở khóa lượt đẩy mới. Hai trạm hoạt động độc lập.
 
+## Xem vận tốc khi chạy trên Pico
+
+Firmware chính đọc hai VL53L1X cách nhau **300 mm** và in trên cùng cổng USB
+với log phân loại. Sau khi nạp `BangTaiPhanLoai.uf2`, mở Serial Monitor của
+cổng Pico ở 115200 baud. Nếu Pico ở COM5, có thể chạy `.\monitor.bat`.
+
+- Mỗi 250 ms, dòng `TRAM1 ... TRAM2 ...` có thêm `v_mm_s` (vận tốc đã lọc)
+  và `v_age_s` (số giây từ lần ghép cặp gần nhất).
+- Dòng `[VAN TOC] Phoi L | v_pair=...` xuất hiện khi ghép được phôi L.
+  Vì trạm 2 đẩy L ngay sau hai mẫu 50–60 mm, vận tốc dùng thời điểm mẫu đầu
+  của hai mẫu liên tiếp ở mỗi trạm. Cạnh ra của L phụ thuộc lúc đẩy.
+- S đi thẳng nên dùng cả hai cạnh. Cấu hình ban đầu nhận S ở 76–84 mm
+  và nền băng từ 85 mm. Cần đối chiếu dải S với giá trị `d` ở cả hai trạm.
+  Với chu kỳ 40 ms, mỗi trạm cần một mẫu mép, ba mẫu trong phôi S và hai mẫu nền.
+- M bị đẩy tại trạm 1. Firmware hiện chỉ dùng phép đo theo cặp vì chưa có
+  chiều dài che hiệu dụng đã hiệu chuẩn hay tín hiệu PWM của động cơ băng.
+- `v_mm_s=--` nghĩa là đang chờ số đo. Số đo cũ hết hạn sau 30 giây.
+  Khi cảm biến mất kết nối, firmware bỏ các cặp đang chờ.
+
+## Mô phỏng đo vận tốc bằng hai ToF
+
+Biên dịch trên máy tính bằng g++ hỗ trợ C++17 rồi chạy trong PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+g++ -std=c++17 belt_speed.cpp simulate_belt_speed.cpp -o build/simulate_belt_speed.exe
+.\build\simulate_belt_speed.exe --once
+```
+
+Bỏ `--once` để theo dõi liên tục, nhấn Ctrl+C để dừng. Bản demo lấy mẫu ToF mỗi
+20 ms, lần lượt chạy ở 200 và 220 mm/s. Trạm 1 đẩy M, trạm 2 đẩy L, S đi
+thẳng. Các khoảng băng trống cuối mỗi lượt cho thấy nguồn vận tốc thay đổi.
+
+`BeltSpeedMonitor` trong `belt_speed.h` và `belt_speed.cpp` nhận khoảng cách
+ToF theo mm ở mỗi trạm. Ngưỡng hiện diện tách phôi khỏi nền băng. Module lưu
+thời điểm cạnh vào đầu tiên, bỏ mẫu mép và lấy trung vị 3–5 mẫu chiều cao
+`(H₀ − d − c) / k` để phân cỡ. Hai mẫu nền xác nhận cạnh ra, lấy thời điểm
+mẫu nền đầu tiên. Phôi cần che đủ lâu và để hở nền giữa hai lượt.
+
+| Nguồn | Khi cập nhật | Cách tính vận tốc (mm/s) |
+| --- | --- | --- |
+| Cặp ToF | S hoặc L ra khỏi vùng đo trạm 2 | Trung bình của `L₁₂ / Δt_vào` và `L₁₂ / Δt_ra` giữa hai trạm |
+| Thời gian che ToF1 | S, M hoặc L rời ToF1 | `(chiều dài phôi + vết đo hiệu dụng theo cỡ) / thời gian che` |
+| Mô hình động cơ | Mỗi 100 ms có dữ liệu PWM và điện áp | `a × PWM(%) × V_s / V_nom + b` |
+
+Thời gian trong bảng tính bằng giây. Các cặp ToF được ghép theo thứ tự
+và kiểm tra cùng cỡ, với giả định phôi không vượt nhau, mỗi phôi được thấy
+ở cả hai trạm dự kiến. Bỏ sót một phôi có thể ghép lệch hai phôi cùng cỡ.
+Mốc quá thời gian hành trình cấu hình sẽ hết hạn.
+
+Khởi tạo một `BeltSpeedMonitor monitor(config);` rồi gọi
+`monitor.update(now_ms, tof1_mm, tof2_mm, motor)` theo từng vòng lặp.
+Truyền `std::nullopt` cho đầu vào chưa có mẫu mới và `0` cho khoảng cách ToF lỗi.
+Kết quả trả về chứa phôi từng trạm và các phép đo mới được chấp nhận.
+`speedMmPerSecond()` cho vận tốc đã lọc, dùng trọng số 0,30 cho cặp ToF,
+0,10 cho thời gian che và 0,02 cho mô hình. Module loại mẫu lệch quá ±20%
+so với ước lượng đang có. `deviation()` so số đo ToF với mô hình, báo cảnh
+báo nếu lệch trên 5% liên tục 30 giây, báo lỗi khi lệch trên 10%.
+
+Mỗi giây, mô phỏng in vận tốc đã lọc, mô hình, tuổi cặp ToF và nguồn ưu tiên
+còn mới. Sau 30 giây không có cặp mới, nguồn hiển thị chuyển sang thời gian
+che nếu vẫn có phôi M, hoặc sang mô hình nếu băng trống. Khi mọi nguồn hết
+hạn, `speedMmPerSecond()` trả về `std::nullopt`.
+
+Bộ tham số trong `simulate_belt_speed.cpp` là số liệu giả lập, gồm khoảng
+cách hai trạm 300 mm, hệ số ToF, chiều dài phôi, vết đo và hệ số PWM.
+Mô hình động cơ cố ý cao hơn vận tốc thực mô phỏng 2% để quan sát bộ lọc.
+Khi dùng phần cứng, thay các tham số bằng số đo hiệu chuẩn của băng thực.
+
+Chạy kiểm thử module bằng `g++ -std=c++17 belt_speed.cpp tests/test_belt_speed.cpp -o build/test_belt_speed.exe`
+rồi chạy `.\build\test_belt_speed.exe`.
+
 ## Kết nối L298N
 
 - GP10 → IN1; solenoid trạm 1 nối giữa OUT1 và OUT2.
