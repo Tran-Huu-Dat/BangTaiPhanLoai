@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(BangTaiPhanLoai main.cpp vl53l1x.cpp)
+add_executable(BangTaiPhanLoai main.cpp vl53l1x.cpp belt_speed.cpp)
 
 pico_set_program_name(BangTaiPhanLoai "BangTaiPhanLoai")
 pico_set_program_version(BangTaiPhanLoai "0.1")

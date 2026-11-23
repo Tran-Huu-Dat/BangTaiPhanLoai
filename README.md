@@ -18,6 +18,25 @@ di chuyển. Sau khi kích, trạm phải nhận 2 mẫu hợp lệ liên tiếp
 trở lên (thấy lại mặt băng tải) mới sẵn sàng nhận phôi tiếp theo. Mẫu lỗi
 không mở khóa lượt đẩy mới. Hai trạm hoạt động độc lập.
 
+## Xem vận tốc khi chạy trên Pico
+
+Firmware chính đọc hai VL53L1X cách nhau **300 mm** và in trên cùng cổng USB
+với log phân loại. Sau khi nạp `BangTaiPhanLoai.uf2`, mở Serial Monitor của
+cổng Pico ở 115200 baud. Nếu Pico ở COM5, có thể chạy `.\monitor.bat`.
+
+- Mỗi 250 ms, dòng `TRAM1 ... TRAM2 ...` có thêm `v_mm_s` (vận tốc đã lọc)
+  và `v_age_s` (số giây từ lần ghép cặp gần nhất).
+- Dòng `[VAN TOC] Phoi L | v_pair=...` xuất hiện khi ghép được phôi L.
+  Vì trạm 2 đẩy L ngay sau hai mẫu 50–60 mm, vận tốc dùng thời điểm mẫu đầu
+  của hai mẫu liên tiếp ở mỗi trạm. Cạnh ra của L phụ thuộc lúc đẩy.
+- S đi thẳng nên dùng cả hai cạnh. Cấu hình ban đầu nhận S ở 76–84 mm
+  và nền băng từ 85 mm. Cần đối chiếu dải S với giá trị `d` ở cả hai trạm.
+  Với chu kỳ 40 ms, mỗi trạm cần một mẫu mép, ba mẫu trong phôi S và hai mẫu nền.
+- M bị đẩy tại trạm 1. Firmware hiện chỉ dùng phép đo theo cặp vì chưa có
+  chiều dài che hiệu dụng đã hiệu chuẩn hay tín hiệu PWM của động cơ băng.
+- `v_mm_s=--` nghĩa là đang chờ số đo. Số đo cũ hết hạn sau 30 giây.
+  Khi cảm biến mất kết nối, firmware bỏ các cặp đang chờ.
+
 ## Mô phỏng đo vận tốc bằng hai ToF
 
 Biên dịch trên máy tính bằng g++ hỗ trợ C++17 rồi chạy trong PowerShell:

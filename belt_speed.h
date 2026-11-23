@@ -21,6 +21,8 @@ struct SpeedConfig {
     float pwm_slope, pwm_intercept, nominal_volts; // duty in percent
     unsigned median_samples = 3; // 3 to 5 interior samples after the leading edge
     uint32_t max_transit_ms = 5000;
+    // Immediate ejection at ToF2 can shorten L's exit timing. Match its leading edges.
+    std::optional<std::array<uint16_t, 2>> ejected_large_range_mm = {};
 };
 
 struct MotorReading {
@@ -52,6 +54,7 @@ public:
 private:
     struct Detector {
         std::optional<uint32_t> enter, clear;
+        std::optional<uint32_t> first_large, confirmed_large;
         std::array<float, 5> heights{};
         unsigned count = 0;
         std::optional<Passage> read(uint32_t now, std::optional<uint16_t> range,

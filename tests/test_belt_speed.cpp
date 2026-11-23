@@ -97,6 +97,36 @@ void testWraparound() {
     passage(m, 1, start, 360, 80);
     assert(near(*passage(m, 2, start + 1500, 360, 60).pair_mm_s, 200));
 }
+
+void testRealBeltWithImmediateEjection() {
+    const SpeedConfig live{300, {{{88, 1, 0}, {88, 1, 0}}}, 4, 12, 25,
+                           {}, {}, 0, 0, 0, 3, 30000, std::array<uint16_t, 2>{50, 60}};
+    BeltSpeedMonitor m(live);
+    for (uint32_t t = 0; t < 240; t += 40) m.update(t, 70); // M is removed.
+    m.update(240, 88);
+    assert(!m.update(280, 88).occupancy_mm_s && !m.speedMmPerSecond());
+
+    for (uint32_t t = 400; t < 720; t += 40) m.update(t, 55);
+    m.update(720, 85);
+    m.update(760, 87);
+    m.update(1400, {}, 55);
+    m.update(1440, {}, 55); // Solenoid triggers on the second actual L sample.
+    m.update(1480, {}, 85);
+    const auto pushed = m.update(1520, {}, 90);
+    assert(pushed.station2 && pushed.station2->size == PartSize::L);
+    assert(pushed.pair_mm_s && near(*pushed.pair_mm_s, 300));
+
+    for (uint32_t t = 1600; t < 1800; t += 40) m.update(t, 82);
+    m.update(1800, 85);
+    m.update(1840, 90);
+    for (uint32_t t = 2600; t < 2840; t += 40) m.update(t, {}, 82);
+    m.update(2840, {}, 85);
+    const auto straight = m.update(2880, {}, 90);
+    assert(straight.station2 && straight.station2->size == PartSize::S);
+    assert(straight.pair_mm_s && near(*straight.pair_mm_s, (300 + 300000.0f / 1040) / 2));
+    m.update(33000);
+    assert(!m.speedMmPerSecond());
+}
 }
 
 int main() {
@@ -105,4 +135,5 @@ int main() {
     testModelCadenceAndFallback();
     testOccupancyOnlyAndModelDeviation();
     testWraparound();
+    testRealBeltWithImmediateEjection();
 }

@@ -14,12 +14,12 @@ BeltSpeedMonitor::BeltSpeedMonitor(const SpeedConfig &config) : config_(config) 
     assert(config.median_samples >= 3 && config.median_samples <= 5);
     assert(config.presence_mm > 0 && config.presence_mm < config.threshold_sm_mm &&
            config.threshold_sm_mm < config.threshold_ml_mm);
-    assert(config.nominal_volts > 0 && config.pwm_slope > 0);
+    assert(config.pwm_slope >= 0 && (config.pwm_slope == 0 || config.nominal_volts > 0));
     for (const auto &station : config.stations) {
         assert(station.belt_distance_mm > 0 && station.gain > 0);
     }
     for (unsigned i = 0; i < config.length_mm.size(); ++i) {
-        assert(config.length_mm[i] > 0 && config.spot_mm[i] >= 0);
+        assert(config.length_mm[i] >= 0 && config.spot_mm[i] >= 0);
     }
 }
 
@@ -27,6 +27,15 @@ std::optional<Passage> BeltSpeedMonitor::Detector::read(
     uint32_t now, std::optional<uint16_t> range, const TofCalibration &station,
     const SpeedConfig &config) {
     if (!range) return {};
+    if (config.ejected_large_range_mm && !confirmed_large) {
+        const auto &band = *config.ejected_large_range_mm;
+        if (*range >= band[0] && *range <= band[1]) {
+            if (first_large) confirmed_large = first_large;
+            else first_large = now;
+        } else {
+            first_large.reset();
+        }
+    }
     if (*range == 0 || *range > 4000) {
         clear.reset();
         return {};
@@ -44,12 +53,15 @@ std::optional<Passage> BeltSpeedMonitor::Detector::read(
         return {};
     }
     std::optional<Passage> event;
-    if (count >= 3 && count == config.median_samples) {
+    if (confirmed_large) {
+        event = Passage{PartSize::L, *confirmed_large, *clear};
+    } else if (count >= 3 && count == config.median_samples) {
         std::sort(heights.begin(), heights.begin() + count);
         const float median = (heights[(count - 1) / 2] + heights[count / 2]) / 2;
         const PartSize size = median <= config.threshold_sm_mm ? PartSize::S :
                               median <= config.threshold_ml_mm ? PartSize::M : PartSize::L;
-        event = Passage{size, *enter, *clear};
+        if (size != PartSize::L || !config.ejected_large_range_mm)
+            event = Passage{size, *enter, *clear};
     }
     *this = {};
     return event;
@@ -66,6 +78,7 @@ bool BeltSpeedMonitor::blend(float sample, float alpha) {
 }
 
 void BeltSpeedMonitor::updateMotor(const MotorReading &reading) {
+    if (config_.pwm_slope == 0) return;
     if (!(reading.duty_percent >= 0 && reading.duty_percent <= 100 &&
           std::isfinite(reading.supply_volts) && reading.supply_volts > 0)) return;
     if (last_model_ && now_ - *last_model_ < model_period_ms) return;
@@ -150,7 +163,7 @@ SpeedUpdate BeltSpeedMonitor::update(uint32_t now_ms, std::optional<uint16_t> to
         if (part.size != PartSize::M) pending_.push_back(part);
         const auto index = static_cast<unsigned>(part.size);
         const uint32_t duration_ms = part.exit_ms - part.enter_ms;
-        if (duration_ms > 0) {
+        if (duration_ms > 0 && config_.length_mm[index] > 0) {
             const float v = 1000 * (config_.length_mm[index] + config_.spot_mm[index]) / duration_ms;
             compareWithModel(v);
             if (blend(v, 0.1f)) {
@@ -165,8 +178,11 @@ SpeedUpdate BeltSpeedMonitor::update(uint32_t now_ms, std::optional<uint16_t> to
         if (arrival.size != departure.size) return result;
         const uint32_t entry_dt = arrival.enter_ms - departure.enter_ms;
         const uint32_t exit_dt = arrival.exit_ms - departure.exit_ms;
-        if (entry_dt && exit_dt && entry_dt <= config_.max_transit_ms && exit_dt <= config_.max_transit_ms) {
-            const float v = 500 * config_.spacing_mm * (1.0f / entry_dt + 1.0f / exit_dt);
+        const bool entry_only = arrival.size == PartSize::L && config_.ejected_large_range_mm.has_value();
+        if (entry_dt && entry_dt <= config_.max_transit_ms &&
+            (entry_only || (exit_dt && exit_dt <= config_.max_transit_ms))) {
+            const float entry_speed = 1000 * config_.spacing_mm / entry_dt;
+            const float v = entry_only ? entry_speed : 0.5f * (entry_speed + 1000 * config_.spacing_mm / exit_dt);
             pending_.pop_front();
             compareWithModel(v);
             if (blend(v, 0.3f)) {
