@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from protocol import (ACTIONS, FRESH_SECONDS, WIFI_SECONDS, Ack, Availability, Command, CommandInput,
                       Event, StrictModel, Telemetry, WifiConnectInput, WifiResult, topic_prefix)
 from storage import Store
+from windows_wifi import scan_windows_networks
 
 LOG = logging.getLogger("pegatron")
 STATIC = Path(__file__).with_name("static")
@@ -123,13 +124,14 @@ class Dashboard:
                                                    "reason": "TIMEOUT", "ssid": None, "networks": [],
                                                    "at": wall_time()}
                 pending = self.wifi_pending = None
-            return {"online": self.fresh(), "pending": pending, **self.wifi_last}
+            return {"online": self.fresh(), "pending": pending, "device_id": self.device_id,
+                    "source": "windows" if self.simulated else "device", **self.wifi_last}
 
     def wifi_send(self, body, kind, publish):
         with self.lock:
             if self.wifi_state()["pending"]:
                 raise HTTPException(409, "WIFI_BUSY")
-            if not self.fresh():
+            if not self.fresh() and not (self.simulated and kind == "scan"):
                 raise HTTPException(409, "OFFLINE")
             request_id = uuid4().hex
             payload = {"schema_version": 1, "request_id": request_id, "action": kind, **body}
@@ -320,12 +322,31 @@ def wifi(request: Request):
 @app.post("/api/wifi/scan", status_code=202)
 def wifi_scan(request: Request):
     local_write(request)
-    return request.app.state.dashboard.wifi_send({}, "scan", request.app.state.bridge.publish)
+    dashboard = request.app.state.dashboard
+    if not dashboard.simulated:
+        return dashboard.wifi_send({}, "scan", request.app.state.bridge.publish)
+    sent = dashboard.wifi_send({}, "scan", lambda *_: True)
+
+    def scan_host():
+        result = {"schema_version": 1, **sent, "kind": "scan", "ok": True,
+                  "reason": "OK", "networks": []}
+        try:
+            result["networks"] = scan_windows_networks()
+        except OSError as error:
+            result.update(ok=False, reason="WIFI_PERMISSION_DENIED" if getattr(error, "winerror", None) == 5
+                          else str(error) if str(error) in ("WINDOWS_WIFI_ONLY", "NO_WIFI_ADAPTER")
+                          else "HOST_SCAN_FAILED")
+        dashboard.wifi_result(json.dumps(result).encode())
+
+    Thread(target=scan_host, daemon=True).start()
+    return sent
 
 
 @app.post("/api/wifi/connect", status_code=202)
 def wifi_connect(data: WifiConnectInput, request: Request):
     local_write(request)
+    if request.app.state.dashboard.simulated:
+        raise HTTPException(409, "SIMULATED_DEVICE")
     body = {"ssid": data.ssid, "password": data.password}
     return request.app.state.dashboard.wifi_send(body, "connect", request.app.state.bridge.publish)
 

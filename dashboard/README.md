@@ -24,6 +24,10 @@ Hoặc mở ba cửa sổ PowerShell trong thư mục `dashboard` và chạy m�
 
 Kiểm tra nhãn **GIẢ LẬP** rồi bắt đầu một buổi chạy. Bấm **Bật phân loại**, xem số S/M/L tăng, sau đó **Tạm dừng phân loại** và tải CSV.
 
+Nút **Wi‑Fi** trong chế độ giả lập đọc mạng thật từ card Wi‑Fi của máy Windows chạy dashboard, tối đa 16 mạng mạnh nhất, gồm cả 2,4 và 5 GHz. Hộp thoại ghi rõ **Wi‑Fi của máy tính** và chỉ cho xem; không mô phỏng thông báo kết nối thành công. RSSI được ước tính từ chất lượng tín hiệu Windows. Khi Windows từ chối quyền đọc, kiểm tra quyền Vị trí trong Cài đặt Windows rồi quét lại; không dùng mạng mẫu để thay kết quả lỗi.
+
+Khi `PEGATRON_DEVICE_ID=pico-01`, hộp thoại **Wi‑Fi của thiết bị** gửi yêu cầu quét/kết nối qua MQTT tới Pico như phần cấu hình máy thật bên dưới. Kết quả lấy từ Pico, chỉ gồm mạng 2,4 GHz mà bo nhìn thấy, nên có thể khác danh sách Windows.
+
 Trong cửa sổ giả lập, nhập `m` rồi Enter để đổi giữa tạm dừng và bảo trì. Dùng `a` để cấp lại quyền, `p` để tạm dừng tại chỗ, `e` để mô phỏng E‑STOP, `r` để xóa lỗi và `h` để bật/tắt heartbeat. Các phím này chỉ có tác dụng trong giả lập.
 
 Thử lại với `--scenario sss`, `mmm`, `lll`, `missing-tray`, `home-fault`, `heartbeat-loss`, `slow-ack`, `lost-ack`, `maintenance` hoặc `noisy-calibration`. Ví dụ `home-fault` bắt đầu ở chế độ bảo trì và lần thử gạt sẽ báo quá hạn HOME. `heartbeat-loss` ngừng phát telemetry sau 12 giây.

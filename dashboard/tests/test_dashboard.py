@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from queue import SimpleQueue
 from threading import Event, Thread
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import paho.mqtt.client as mqtt
 from fastapi.testclient import TestClient
@@ -124,6 +125,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIsNotNone(self.dashboard.wifi_state()["pending"])  # Unknown id ignored.
         self.dashboard.wifi_result(simulated_wifi(json.dumps(sent[-1][1])))
         state = self.dashboard.wifi_state()
+        self.assertEqual((state["source"], state["device_id"]), ("windows", "sorter-sim"))
         self.assertIsNone(state["pending"])
         self.assertEqual(state["scan"]["networks"][0]["ssid"], "Pegatron-Lab")
         self.assertEqual(state["scan"]["request_id"], scan["request_id"])
@@ -147,6 +149,71 @@ class DashboardTests(unittest.TestCase):
         physical.handle_message("availability", '{"schema_version":1,"link_id":"link1","status":"online"}')
         physical.handle_message("telemetry", json.dumps(self.sim.telemetry(10)))
         self.assertEqual(physical.status()["controls"]["ENABLE_SORTING"], "MONITOR_ONLY")
+        self.assertEqual((physical.wifi_state()["source"], physical.wifi_state()["device_id"]),
+                         ("device", "pico-01"))
+
+    def test_wifi_http_uses_windows_without_simulator_or_fake_connect(self):
+        publish = Mock(return_value=True)
+        self.dashboard.broker_status(False)
+        with patch.object(app.state, "dashboard", self.dashboard, create=True), \
+                patch.object(app.state, "bridge", SimpleNamespace(publish=publish), create=True), \
+                patch("app.scan_windows_networks", return_value=[
+                    {"ssid": "BM KTMT", "rssi": -51, "secure": True}]) as scan:
+            http = TestClient(app, base_url="http://127.0.0.1")
+            sent = http.post("/api/wifi/scan")
+            self.assertEqual(sent.status_code, 202)
+            wait_for(lambda: self.dashboard.wifi_state()["scan"])
+            state = http.get("/api/wifi").json()
+            self.assertEqual(state["scan"]["request_id"], sent.json()["request_id"])
+            self.assertEqual(state["scan"]["networks"][0]["ssid"], "BM KTMT")
+            self.assertIsNone(state["pending"])
+            scan.assert_called_once()
+            publish.assert_not_called()
+            self.assertEqual(http.post("/api/wifi/connect", json={"ssid": "BM KTMT", "password": "12345678"})
+                             .json()["detail"], "SIMULATED_DEVICE")
+            denied = OSError("denied")
+            denied.winerror = 5
+            scan.side_effect = denied
+            failed = http.post("/api/wifi/scan").json()["request_id"]
+            wait_for(lambda: self.dashboard.wifi_state()["scan"]["request_id"] == failed)
+            state = http.get("/api/wifi").json()
+            self.assertFalse(state["scan"]["ok"])
+            self.assertEqual(state["scan"]["reason"], "WIFI_PERMISSION_DENIED")
+            self.assertEqual(state["scan"]["networks"], [])
+            self.assertIsNone(state["pending"])
+            physical = Dashboard("pico-01", Path(self.dir.name) / "wifi-physical.sqlite3")
+            self.addCleanup(physical.store.db.close)
+            physical.broker_status(True)
+            physical.handle_message("availability", '{"schema_version":1,"link_id":"link1","status":"online"}')
+            physical.handle_message("telemetry", json.dumps(self.sim.telemetry(10)))
+            app.state.dashboard = physical
+            self.assertEqual(http.post("/api/wifi/scan").status_code, 202)
+            publish.assert_called_once()
+            self.assertEqual(publish.call_args.args[1], "wifi/request")
+            self.assertEqual(scan.call_count, 2)
+
+    def test_host_wifi_scan_returns_before_windows_finishes(self):
+        started, release = Event(), Event()
+
+        def slow_scan():
+            started.set()
+            if not release.wait(3):
+                raise OSError("HOST_SCAN_FAILED")
+            return []
+
+        with patch.object(app.state, "dashboard", self.dashboard, create=True), \
+                patch("app.scan_windows_networks", side_effect=slow_scan):
+            try:
+                http = TestClient(app, base_url="http://127.0.0.1")
+                sent = http.post("/api/wifi/scan")
+                self.assertEqual(sent.status_code, 202)
+                self.assertTrue(started.wait(1))
+                self.assertIsNotNone(self.dashboard.wifi_state()["pending"])
+                self.assertIsNone(self.dashboard.wifi_state()["scan"])
+                self.assertEqual(http.post("/api/wifi/scan").status_code, 409)
+            finally:
+                release.set()
+                wait_for(lambda: self.dashboard.wifi_state()["scan"])
 
 
 class SimulatorTests(unittest.TestCase):
