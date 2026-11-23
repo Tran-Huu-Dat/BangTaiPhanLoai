@@ -22,3 +22,9 @@
 - Ảnh hưởng: không thấy log hoặc mở sai cổng. MicroPico từng kẹt ở “Closing port…”; rút/cắm lại USB đã cho phép đọc COM6.
 - Gate 0: `[System.IO.Ports.SerialPort]::GetPortNames()` và `Get-ItemProperty 'HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM'`.
 - Xử lý: chọn cổng USB hiện tại, chỉ mở một Serial Monitor/MicroPico tại một thời điểm; xem `debug-cam-bien.md`.
+
+## INT-01 — Tích hợp dashboard (2026-11-23)
+
+- Đường dẫn: bản vá gốc mặc định `PEGATRON_IOT_DIR=../pegatron-iot`; trong repo này dashboard nằm ở `dashboard/`, đã đổi mặc định trong `CMakeLists.txt`.
+- Lệnh điều khiển: backend khóa lệnh khi `estop` là `null`; firmware không có đầu vào E‑STOP nên thêm `PEGATRON_ESTOP_ABSENT=1` (rủi ro được người vận hành chấp nhận, xem docs/dashboard.md).
+- Chưa thử trên Pico thật: chỉ có build firmware (Pico SDK 2.3.1) và 10 test backend đạt.
