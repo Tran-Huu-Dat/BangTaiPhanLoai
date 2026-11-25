@@ -43,6 +43,15 @@
 #include "calib_math.h"
 #endif
 
+#ifndef USE_SORTER_ENGINE
+#define USE_SORTER_ENGINE 1
+#endif
+
+#if USE_SORTER_ENGINE
+#include "sorter_fsm.h"
+#include "calib_math.h"
+#endif
+
 // ======================= CAU HINH CHAN =======================
 #define TOF1_I2C        i2c0
 #define TOF1_SDA_PIN    0
