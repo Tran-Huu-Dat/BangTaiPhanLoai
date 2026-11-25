@@ -1,0 +1,34 @@
+user dashboard
+topic read pegatron/v1/sorter-sim/availability
+topic read pegatron/v1/sorter-sim/telemetry
+topic read pegatron/v1/sorter-sim/events
+topic read pegatron/v1/sorter-sim/ack
+topic write pegatron/v1/sorter-sim/command
+topic write pegatron/v1/sorter-sim/wifi/request
+topic read pegatron/v1/sorter-sim/wifi/result
+topic read pegatron/v1/pico-01/availability
+topic read pegatron/v1/pico-01/telemetry
+topic read pegatron/v1/pico-01/events
+topic read pegatron/v1/pico-01/ack
+topic write pegatron/v1/pico-01/command
+topic write pegatron/v1/pico-01/wifi/request
+topic read pegatron/v1/pico-01/wifi/result
+
+user simulator
+topic write pegatron/v1/sorter-sim/availability
+topic write pegatron/v1/sorter-sim/telemetry
+topic write pegatron/v1/sorter-sim/events
+topic write pegatron/v1/sorter-sim/ack
+topic read pegatron/v1/sorter-sim/command
+topic read pegatron/v1/sorter-sim/wifi/request
+topic write pegatron/v1/sorter-sim/wifi/result
+
+user pico-01
+topic write pegatron/v1/pico-01/availability
+topic write pegatron/v1/pico-01/telemetry
+topic write pegatron/v1/pico-01/events
+topic write pegatron/v1/pico-01/ack
+topic read pegatron/v1/pico-01/command
+topic read pegatron/v1/pico-01/wifi/request
+topic write pegatron/v1/pico-01/wifi/result
+

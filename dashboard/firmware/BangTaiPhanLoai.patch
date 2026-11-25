@@ -1,0 +1,173 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 638f1a6..3e0a49f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -35,7 +35,12 @@ pico_sdk_init()
+ 
+ # Add executable. Default name is the project name, version 0.1
+ 
+-add_executable(BangTaiPhanLoai main.cpp vl53l1x.cpp)
++set(PEGATRON_IOT_DIR "${CMAKE_CURRENT_LIST_DIR}/../pegatron-iot" CACHE PATH "Dashboard project")
++set(PEGATRON_FIRMWARE_DIR "${PEGATRON_IOT_DIR}/firmware")
++include("${PEGATRON_FIRMWARE_DIR}/configure.cmake")
++
++add_executable(BangTaiPhanLoai main.cpp vl53l1x.cpp
++    "${PEGATRON_FIRMWARE_DIR}/pegatron_monitor.c")
+ 
+ pico_set_program_name(BangTaiPhanLoai "BangTaiPhanLoai")
+ pico_set_program_version(BangTaiPhanLoai "0.1")
+@@ -51,13 +56,18 @@ target_link_libraries(BangTaiPhanLoai
+ # Add the standard include files to the build
+ target_include_directories(BangTaiPhanLoai PRIVATE
+         ${CMAKE_CURRENT_LIST_DIR}
++        ${CMAKE_CURRENT_BINARY_DIR}
++        ${PEGATRON_FIRMWARE_DIR}
+ )
+ 
+ # Add any user requested libraries
+ target_link_libraries(BangTaiPhanLoai 
+         hardware_i2c
+         hardware_timer
+-        pico_cyw43_arch_none
++        pico_cyw43_arch_lwip_poll
++        pico_lwip_mqtt
++        pico_multicore
++        pico_rand
+         )
+ 
+ pico_add_extra_outputs(BangTaiPhanLoai)
+diff --git a/main.cpp b/main.cpp
+index 2ea32fa..2d3e8d7 100644
+--- a/main.cpp
++++ b/main.cpp
+@@ -19,6 +19,10 @@
+ #include "pico/stdlib.h"
+ #include "hardware/i2c.h"
+ #include "pico/cyw43_arch.h"
++#include "pico/multicore.h"
++#include "pico/util/queue.h"
++#include "pegatron_monitor.h"
++#include "pegatron_local_config.h"
+ #include "vl53l1x.h"
+ 
+ // ======================= CAU HINH CHAN =======================
+@@ -83,6 +87,7 @@ struct Station {
+     uint8_t       q_head;
+     uint8_t       q_tail;
+     uint8_t       q_count;
++    uint32_t      push_count;
+ };
+ 
+ static VL53L1X tof1(TOF1_I2C);
+@@ -134,6 +139,7 @@ static void solenoidInit(uint pin) {
+ 
+ static void solenoidSet(Station &s, bool on) {
+     gpio_put(s.sol_pin, on ? 1 : 0);
++    if (on) ++s.push_count;
+     printf("[%s] Solenoid (GP%u) -> %s | d=%u mm | Tong: %lu\n",
+            s.name, s.sol_pin, on ? "HUT (ON)" : "NHA (OFF)", s.distance_mm, (unsigned long)s.total_count);
+ }
+@@ -311,6 +317,64 @@ static void printStatus() {
+ // =====================================================================
+ //                       MAIN
+ // =====================================================================
++// Only core 0 reads the stations or changes an output. Core 1 owns CYW43/lwIP.
++static queue_t snapshot_queue;
++alignas(32) static uint32_t network_stack[2048];
++
++static pegatron_snapshot makeSnapshot() {
++    const int references[] = {PEGATRON_REFERENCE_1_MM, PEGATRON_REFERENCE_2_MM};
++    pegatron_snapshot snapshot{};
++    snapshot.mode = PEGATRON_SORTING;
++    for (unsigned i = 0; i < 2; ++i) {
++        const Station &source = stations[i];
++        pegatron_station &target = snapshot.station[i];
++        const bool valid = source.sensor_ok && source.has_valid_target;
++        const int height = references[i] - source.distance_mm;
++        target.sample_valid = target.distance_known = valid;
++        target.distance_mm = source.distance_mm;
++        target.push_count = source.push_count;
++        target.reference_known = references[i] > 0;
++        target.reference_mm = references[i];
++        target.height_known = valid && target.reference_known && height >= -2000 && height <= 2000;
++        target.height_mm = target.height_known ? height : 0;
++        snapshot.tof_unavailable[i] = !source.sensor_ok;
++    }
++    return snapshot;
++}
++
++static void networkWorker() {
++    const pegatron_settings settings = {
++        "pico-01", PEGATRON_WIFI_SSID, PEGATRON_WIFI_PASSWORD, PEGATRON_BROKER_IPV4,
++        "pico-01", PEGATRON_MQTT_PASSWORD, 1883
++    };
++    if (!pegatron_monitor_init(&settings)) {
++        while (true) sleep_ms(1000);
++    }
++    pegatron_snapshot snapshot{};
++    pegatron_snapshot next{};
++    bool have_snapshot = false;
++    uint32_t last_blink = 0;
++    bool led_state = false;
++    while (true) {
++        bool changed = false;
++        while (queue_try_remove(&snapshot_queue, &next)) {
++            changed |= !have_snapshot || next.mode != snapshot.mode ||
++                next.tof_unavailable[0] != snapshot.tof_unavailable[0] ||
++                next.tof_unavailable[1] != snapshot.tof_unavailable[1];
++            snapshot = next;
++            have_snapshot = true;
++        }
++        if (have_snapshot) pegatron_monitor_tick(&snapshot, changed);
++        const uint32_t now = millis();
++        if (now - last_blink >= 500) {
++            last_blink = now;
++            led_state = !led_state;
++            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
++        }
++        sleep_ms(2);
++    }
++}
++
+ int main() {
+     stdio_init_all();
+ 
+@@ -319,8 +383,6 @@ int main() {
+     printf("   BANG TAI PHAN LOAI TU DONG - Raspberry Pi Pico 2 W   \n");
+     printf("=======================================================\n");
+ 
+-    bool led_ok = (cyw43_arch_init() == 0);
+-
+     for (int i = 0; i < 2; i++) {
+         Station &s = stations[i];
+         s.state = ST_IDLE;
+@@ -333,8 +395,12 @@ int main() {
+         tofInit(s);
+     }
+ 
+-    uint32_t last_print = 0, last_blink = 0;
+-    bool led_state = false;
++    const bool network_enabled = PEGATRON_WIFI_SSID[0] != '\0';
++    if (network_enabled) {
++        queue_init(&snapshot_queue, sizeof(pegatron_snapshot), 4);
++        multicore_launch_core1_with_stack(networkWorker, network_stack, sizeof network_stack);
++    }
++    uint32_t last_print = 0, last_snapshot = 0;
+ 
+     while (true) {
+         stationUpdate(stations[0]);
+@@ -345,10 +411,10 @@ int main() {
+             last_print = now;
+             printStatus();
+         }
+-        if (led_ok && now - last_blink >= 500) {
+-            last_blink = now;
+-            led_state = !led_state;
+-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
++        if (network_enabled && now - last_snapshot >= 100) {
++            last_snapshot = now;
++            const auto snapshot = makeSnapshot();
++            queue_try_add(&snapshot_queue, &snapshot);
+         }
+     }
+ }
