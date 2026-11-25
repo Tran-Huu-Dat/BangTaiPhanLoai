@@ -15,9 +15,12 @@
     BAD_CREDENTIALS: "Tên mạng hoặc mật khẩu không hợp lệ (mật khẩu 8–63 ký tự).",
     WIFI_FAILED: "Không vào được mạng này, kiểm tra mật khẩu. Thiết bị đã quay về mạng cũ.",
     BROKER_UNREACHABLE: "Vào được mạng nhưng không thấy broker MQTT. Máy tính phải cùng mạng này. Thiết bị đã quay về mạng cũ.",
+    BUILD_FAILED: "Không build được file BangTaiPhanLoai.uf2. Kiểm tra thư mục build.",
+    HOST_WIFI_NOT_CONNECTED: "Máy tính chưa kết nối Wi‑Fi để dùng chung.",
     TIMEOUT: "Chưa nhận được phản hồi. Nếu thiết bị đã đổi mạng, đưa máy tính sang cùng mạng rồi quét lại."
   };
   let selected = null, busy = false, source = null;
+  const canConnect = () => source === "device" || source === "windows_provision";
 
   const say = message => { $("wifi-status").textContent = message; };
   const bars = rssi => rssi > -55 ? "▂▄▆█" : rssi > -67 ? "▂▄▆" : rssi > -78 ? "▂▄" : "▂";
@@ -52,7 +55,7 @@
       name.textContent = net.ssid;
       meta.textContent = `${net.secure ? "🔒 " : ""}${bars(net.rssi)} ${net.rssi} dBm`;
       button.type = "button";
-      button.disabled = source !== "device";
+      button.disabled = !canConnect();
       button.setAttribute("aria-pressed", String(selected === net.ssid));
       button.append(name, meta);
       button.addEventListener("click", () => pick(net));
@@ -76,8 +79,18 @@
   function setBusy(value) {
     busy = value;
     $("wifi-scan").disabled = value;
+    $("wifi-host-connect").disabled = value || !canConnect();
     for (const control of [$("wifi-connect"), ...list.querySelectorAll("button")]) {
-      control.disabled = value || source !== "device";
+      control.disabled = value || !canConnect();
+    }
+  }
+
+  function showConnectResult(result, ssidLabel) {
+    if (result.ok && typeof result.reason === "string" && result.reason.startsWith("PROVISIONED_UF2:")) {
+      const ip = result.reason.slice("PROVISIONED_UF2:".length);
+      say(`Đã lưu Wi‑Fi “${result.ssid || ssidLabel}” (broker ${ip}:1883) vào build/BangTaiPhanLoai.uf2. Chép file .uf2 vào Pico để kết nối chung Wi‑Fi.`);
+    } else {
+      say(result.ok ? `Đã kết nối “${result.ssid || ssidLabel}” và lưu vào thiết bị.` : text[result.reason] || result.reason);
     }
   }
 
@@ -96,12 +109,25 @@
     try {
       const state = await call("/api/wifi");
       source = state.source;
-      $("wifi-title").textContent = source === "windows" ? "Wi‑Fi của máy tính" : "Wi‑Fi của thiết bị";
+      const hostBtn = $("wifi-host-connect");
+      if (state.host_ssid && canConnect()) {
+        hostBtn.hidden = false;
+        hostBtn.textContent = `Dùng chung Wi‑Fi “${state.host_ssid}”`;
+      } else {
+        hostBtn.hidden = true;
+      }
+      $("wifi-title").textContent = source === "windows"
+        ? "Wi‑Fi của máy tính"
+        : source === "windows_provision"
+          ? "Cấu hình Wi‑Fi chung cho Pico"
+          : "Wi‑Fi của thiết bị";
       $("wifi-source").textContent = source === "windows"
         ? "Mạng thật từ Windows trên máy chạy dashboard (tối đa 16 mạng). Thiết bị đang mô phỏng nên chỉ xem danh sách; chưa thể đổi Wi‑Fi cho Pico. Cường độ là giá trị ước tính."
-        : `Quét từ ${state.device_id}. Chọn mạng 2,4 GHz mà máy tính này cũng đang dùng. Nếu mạng mới lỗi, thiết bị tự quay về mạng cũ.`;
+        : source === "windows_provision"
+          ? "Thiết bị chưa nối Wi‑Fi. Chọn mạng Wi‑Fi 2,4 GHz mà máy tính đang dùng và nhập mật khẩu để tạo file BangTaiPhanLoai.uf2 sẵn sàng nạp vào Pico."
+          : `Quét từ ${state.device_id}. Chọn mạng 2,4 GHz mà máy tính này cũng đang dùng. Nếu mạng mới lỗi, thiết bị tự quay về mạng cũ.`;
       const {request_id} = await call("/api/wifi/scan", {});
-      const result = await waitFor("scan", request_id, source === "windows" ? 45 : 20);
+      const result = await waitFor("scan", request_id, source === "device" ? 20 : 45);
       if (result.ok) {
         render(result.networks);
         say(result.networks.length ? `Tìm thấy ${result.networks.length} mạng.` : "Không tìm thấy mạng nào.");
@@ -114,13 +140,33 @@
 
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    if (busy || !selected || source !== "device") return;
+    if (busy || !selected || !canConnect()) return;
     setBusy(true);
-    say("Đang chuyển mạng. Thiết bị sẽ ngoại tuyến vài giây…");
+    say(source === "windows_provision"
+      ? "Đang lưu cấu hình Wi‑Fi và tạo file BangTaiPhanLoai.uf2…"
+      : "Đang chuyển mạng. Thiết bị sẽ ngoại tuyến vài giây…");
     try {
       const {request_id} = await call("/api/wifi/connect", {ssid: selected, password: $("wifi-password").value});
       const result = await waitFor("connect", request_id, 45);
-      say(result.ok ? `Đã kết nối “${result.ssid || selected}” và lưu vào thiết bị.` : text[result.reason] || result.reason);
+      showConnectResult(result, selected);
+      if (result.ok) {
+        form.hidden = true;
+        $("wifi-password").value = "";
+      }
+    } catch (error) {
+      say(text[error.message] || "Không gọi được máy chủ dashboard.");
+    }
+    setBusy(false);
+  });
+
+  $("wifi-host-connect").addEventListener("click", async () => {
+    if (busy || !canConnect()) return;
+    setBusy(true);
+    say("Đang lấy Wi‑Fi máy tính đang dùng và tạo file BangTaiPhanLoai.uf2…");
+    try {
+      const {request_id, ssid} = await call("/api/wifi/connect-host", {});
+      const result = await waitFor("connect", request_id, 45);
+      showConnectResult(result, ssid || "máy tính");
       if (result.ok) {
         form.hidden = true;
         $("wifi-password").value = "";

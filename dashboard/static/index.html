@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PEGATRON · Bàn điều khiển phân loại</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script defer src="/static/dashboard.js"></script>
+  <link rel="stylesheet" href="/static/style.css?v=6">
+  <script defer src="/static/dashboard.js?v=6"></script>
   <script defer src="/static/wifi.js"></script>
 </head>
 <body>
@@ -17,7 +17,7 @@
       <span>PEGATRON <small>IoT</small></span>
     </a>
     <nav aria-label="Điều hướng chính">
-      <a href="#tong-quan">Tổng quan</a><a href="#dieu-khien">Điều khiển</a><a href="#lich-su">Lịch sử</a>
+      <a href="#tong-quan">Tổng quan</a><a href="#cau-hinh">Cấu hình</a><a href="#dieu-khien">Điều khiển</a><a href="#lich-su">Lịch sử</a>
     </nav>
     <span class="network-label">Mạng nội bộ</span>
     <button id="wifi-open" class="icon-btn" type="button" aria-haspopup="dialog" aria-label="Wi‑Fi của thiết bị" title="Wi‑Fi của thiết bị">
@@ -44,9 +44,46 @@
     <p id="stale-warning" class="notice" hidden>Đang hiển thị dữ liệu cuối. Điều khiển từ dashboard đã khóa.</p>
 
     <section class="panel flow" aria-labelledby="flow-title">
-      <div class="panel-heading"><div><h2 id="flow-title">Hai trạm phân loại</h2><p>S và M được gạt tại trạm. L đi thẳng tới cuối băng.</p></div></div>
-      <div class="belt" aria-label="Thứ tự trên băng tải"><span>Đầu vào</span><span>Trạm 1 · S</span><span>Trạm 2 · M</span><span>Khay L</span></div>
+      <div class="panel-heading"><div><h2 id="flow-title">Hai trạm phân loại</h2><p>L được gạt tại Trạm 1, M được gạt tại Trạm 2. S đi thẳng tới cuối băng (không đẩy).</p></div></div>
+      <div class="belt" aria-label="Thứ tự trên băng tải">
+        <span class="belt-node">Đầu vào</span>
+        <span class="belt-node" id="belt-node-1">Trạm 1 · <b class="l">Gạt L</b></span>
+        <span class="belt-node" id="belt-node-2">Trạm 2 · <b class="m">Gạt M</b></span>
+        <span class="belt-node">Khay <b class="s">S</b> (cuối băng)</span>
+      </div>
       <div class="stations" id="stations"></div>
+    </section>
+
+    <section id="cau-hinh" class="panel" aria-labelledby="config-title">
+      <div class="panel-heading"><div><h2 id="config-title">Cấu hình hai trạm (nhập tay)</h2><p>Nhập khoảng chiều cao vật độc lập cho từng trạm — không phụ thuộc mốc H0 và cho phép để khe đệm chống sai số ToF.</p></div></div>
+      <form id="config-form">
+        <div class="config-stations">
+          <div class="config-box">
+            <h3>Trạm 1 · <span class="l">Gạt L</span></h3>
+            <div class="config-grid">
+              <div><label for="cfg-l-min">Chiều cao L từ (mm)</label><input id="cfg-l-min" type="number" step="0.5" min="0" max="299" required></div>
+              <div><label for="cfg-l-max">Chiều cao L đến (mm)</label><input id="cfg-l-max" type="number" step="0.5" min="1" max="300" required></div>
+              <div><label for="cfg-s1-on">Thời gian đẩy (ms)</label><input id="cfg-s1-on" type="number" step="10" min="50" max="600" required></div>
+              <div><label for="cfg-s1-delay">Độ trễ gạt (ms)</label><input id="cfg-s1-delay" type="number" step="5" min="0" max="3000" required></div>
+            </div>
+          </div>
+          <div class="config-box">
+            <h3>Trạm 2 · <span class="m">Gạt M</span></h3>
+            <div class="config-grid">
+              <div><label for="cfg-m-min">Chiều cao M từ (mm)</label><input id="cfg-m-min" type="number" step="0.5" min="0" max="299" required></div>
+              <div><label for="cfg-m-max">Chiều cao M đến (mm)</label><input id="cfg-m-max" type="number" step="0.5" min="1" max="300" required></div>
+              <div><label for="cfg-s2-on">Thời gian đẩy (ms)</label><input id="cfg-s2-on" type="number" step="10" min="50" max="600" required></div>
+              <div><label for="cfg-s2-delay">Độ trễ gạt (ms)</label><input id="cfg-s2-delay" type="number" step="5" min="0" max="3000" required></div>
+            </div>
+          </div>
+        </div>
+        <div class="config-shared">
+          <label for="cfg-min-off">Thời gian hồi solenoid giữa 2 nhịp (ms)</label>
+          <input id="cfg-min-off" type="number" step="10" min="40" max="500" required>
+        </div>
+        <p id="cfg-preview" class="helper"></p>
+        <div class="config-actions"><button id="cfg-save" type="submit">Lưu &amp; áp dụng xuống mạch</button><span id="cfg-feedback" class="helper" role="status"></span></div>
+      </form>
     </section>
 
     <section class="panel count-panel" aria-labelledby="counts-title">
@@ -83,7 +120,7 @@
 <dialog id="wifi-dialog" aria-labelledby="wifi-title">
   <form method="dialog" class="wifi-head"><h2 id="wifi-title">Wi‑Fi của thiết bị</h2><button class="secondary" value="close">Đóng</button></form>
   <p id="wifi-source" class="helper">Đang xác định nguồn quét Wi‑Fi…</p>
-  <div class="wifi-tools"><button id="wifi-scan" type="button" class="secondary">Quét lại</button><span id="wifi-status" role="status" class="helper"></span></div>
+  <div class="wifi-tools"><button id="wifi-host-connect" type="button" hidden>Dùng chung Wi‑Fi máy tính</button><button id="wifi-scan" type="button" class="secondary">Quét lại</button><span id="wifi-status" role="status" class="helper"></span></div>
   <ul id="wifi-list" class="wifi-list" aria-label="Mạng Wi‑Fi tìm thấy"></ul>
   <form id="wifi-form" hidden>
     <label for="wifi-password" id="wifi-target">Mật khẩu</label>
