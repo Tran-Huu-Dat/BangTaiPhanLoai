@@ -1,5 +1,7 @@
 build
 !.vscode/*
-/docs/*
-!/docs/debug-cam-bien.md
-!/docs/conflicts-and-bugs.md
+.omc/
+__pycache__/
+*.pyc
+dashboard.zip
+docs/*.docx
