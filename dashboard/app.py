@@ -3,6 +3,8 @@ import hmac
 import json
 import logging
 import os
+import socket
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,24 +16,102 @@ import paho.mqtt.client as mqtt
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from protocol import (ACTIONS, FRESH_SECONDS, WIFI_SECONDS, Ack, Availability, Command, CommandInput,
                       Event, StrictModel, Telemetry, WifiConnectInput, WifiResult, topic_prefix)
 from storage import Store
-from windows_wifi import scan_windows_networks
+from windows_wifi import get_current_windows_ssid, get_current_windows_wifi, scan_windows_networks
 
 LOG = logging.getLogger("pegatron")
 STATIC = Path(__file__).with_name("static")
 MESSAGES = {"telemetry": Telemetry, "availability": Availability, "events": Event, "ack": Ack}
 WALL_START = time.time()
 COUNTER_START = time.perf_counter()
+DEFAULT_STATION_CONFIG = {
+    "l_min_mm": 22.0,
+    "l_max_mm": 100.0,
+    "m_min_mm": 7.0,
+    "m_max_mm": 20.0,
+    "station_1_on_ms": 220,
+    "station_1_delay_ms": 0,
+    "station_2_on_ms": 220,
+    "station_2_delay_ms": 0,
+    "min_off_ms": 120,
+}
+
+
+class StationConfigInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    l_min_mm: float = Field(ge=0.0, le=299.0)
+    l_max_mm: float = Field(ge=1.0, le=300.0)
+    m_min_mm: float = Field(ge=0.0, le=299.0)
+    m_max_mm: float = Field(ge=1.0, le=300.0)
+    station_1_on_ms: int = Field(ge=50, le=600)
+    station_1_delay_ms: int = Field(ge=0, le=3000)
+    station_2_on_ms: int = Field(ge=50, le=600)
+    station_2_delay_ms: int = Field(ge=0, le=3000)
+    min_off_ms: int = Field(ge=40, le=500)
+
+    @model_validator(mode="after")
+    def validate_ranges(self):
+        if self.l_min_mm >= self.l_max_mm:
+            raise ValueError("l_max_mm must exceed l_min_mm")
+        if self.m_min_mm >= self.m_max_mm:
+            raise ValueError("m_max_mm must exceed m_min_mm")
+        return self
 
 
 def wall_time():
     # On Windows, successive time.time() calls can be identical even across DB writes.
     return WALL_START + (time.perf_counter() - COUNTER_START)
+
+
+def _c_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _detect_lan_ipv4() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def _provision_local_uf2(ssid: str, password: str, broker_ipv4: str) -> tuple[bool, str]:
+    root = Path(__file__).resolve().parent.parent
+    build_dir = root / "build"
+    ninja = Path.home() / ".pico-sdk" / "ninja" / "v1.13.2" / "ninja.exe"
+    if not build_dir.is_dir() or not ninja.is_file():
+        return False, "BUILD_FAILED"
+    cfg = (
+        "#pragma once\n\n"
+        f'#define PEGATRON_WIFI_SSID "{_c_escape(ssid)}"\n'
+        f'#define PEGATRON_WIFI_PASSWORD "{_c_escape(password)}"\n'
+        f'#define PEGATRON_BROKER_IPV4 "{_c_escape(broker_ipv4)}"\n'
+        '#define PEGATRON_MQTT_PASSWORD ""\n'
+        "#define PEGATRON_REFERENCE_1_MM 82\n"
+        "#define PEGATRON_REFERENCE_2_MM 82\n"
+    )
+    (build_dir / "pegatron_local_config.h").write_text(cfg, encoding="utf-8")
+    try:
+        proc = subprocess.run(
+            [str(ninja), "-C", str(build_dir)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "BUILD_FAILED"
+    if proc.returncode != 0:
+        LOG.warning("UF2 build failed: %s", proc.stderr or proc.stdout)
+        return False, "BUILD_FAILED"
+    return True, f"PROVISIONED_UF2:{broker_ipv4}"
 
 
 class Dashboard:
@@ -50,6 +130,29 @@ class Dashboard:
         self.fresh_at = None
         self.online_link = None
         self.broker_connected = False
+        self.config_path = path.with_name(f"{device_id}_config.json")
+        self.station_config = self._load_config()
+
+    def _load_config(self):
+        if self.config_path.is_file():
+            try:
+                raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+                return StationConfigInput.model_validate(raw).model_dump()
+            except (OSError, json.JSONDecodeError, ValidationError):
+                pass
+        return dict(DEFAULT_STATION_CONFIG)
+
+    def get_config(self):
+        with self.lock:
+            return dict(self.station_config)
+
+    def save_config(self, cfg):
+        validated = StationConfigInput.model_validate(cfg).model_dump()
+        with self.lock:
+            self.station_config = validated
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            self.config_path.write_text(json.dumps(validated, indent=2), encoding="utf-8")
+            return dict(self.station_config)
 
     def broker_status(self, connected):
         with self.lock:
@@ -125,13 +228,15 @@ class Dashboard:
                                                    "at": wall_time()}
                 pending = self.wifi_pending = None
             return {"online": self.fresh(), "pending": pending, "device_id": self.device_id,
-                    "source": "windows" if self.simulated else "device", **self.wifi_last}
+                    "source": "windows" if self.simulated else ("device" if self.fresh() else "windows_provision"),
+                    "host_ssid": None if self.simulated else get_current_windows_ssid(),
+                    **self.wifi_last}
 
-    def wifi_send(self, body, kind, publish):
+    def wifi_send(self, body, kind, publish, allow_offline=False):
         with self.lock:
             if self.wifi_state()["pending"]:
                 raise HTTPException(409, "WIFI_BUSY")
-            if not self.fresh() and not (self.simulated and kind == "scan"):
+            if not self.fresh() and not allow_offline and not (self.simulated and kind == "scan"):
                 raise HTTPException(409, "OFFLINE")
             request_id = uuid4().hex
             payload = {"schema_version": 1, "request_id": request_id, "action": kind, **body}
@@ -231,6 +336,7 @@ class Bridge:
         client.subscribe([(f"{self.dashboard.prefix}/{leaf}", int(leaf != "telemetry")) for leaf in MESSAGES]
                          + [(f"{self.dashboard.prefix}/wifi/result", 1)])
         self.dashboard.broker_status(True)
+        self.publish(json.dumps(self.dashboard.get_config()), "config/set", retain=True)
 
     def on_message(self, client, userdata, message):
         prefix = self.dashboard.prefix + "/"
@@ -240,12 +346,12 @@ class Bridge:
         elif message.topic.startswith(prefix):
             self.dashboard.handle_message(message.topic[len(prefix):], message.payload, message.retain)
 
-    def publish(self, payload, leaf="command"):
+    def publish(self, payload, leaf="command", retain=False):
         client = self.client
         if client is None:
             return False
         try:
-            return client.publish(f"{self.dashboard.prefix}/{leaf}", payload, qos=1).rc == mqtt.MQTT_ERR_SUCCESS
+            return client.publish(f"{self.dashboard.prefix}/{leaf}", payload, qos=1, retain=retain).rc == mqtt.MQTT_ERR_SUCCESS
         except OSError:
             return False
 
@@ -297,6 +403,19 @@ def status(request: Request):
     return request.app.state.dashboard.status()
 
 
+@app.get("/api/config")
+def get_config(request: Request):
+    return request.app.state.dashboard.get_config()
+
+
+@app.post("/api/config")
+def save_config(data: StationConfigInput, request: Request):
+    local_write(request)
+    saved = request.app.state.dashboard.save_config(data.model_dump())
+    published = request.app.state.bridge.publish(json.dumps(saved), "config/set", retain=True)
+    return {"ok": True, "config": saved, "published": published}
+
+
 @app.post("/api/commands", status_code=202)
 def send_command(data: CommandInput, request: Request):
     local_write(request)
@@ -323,9 +442,9 @@ def wifi(request: Request):
 def wifi_scan(request: Request):
     local_write(request)
     dashboard = request.app.state.dashboard
-    if not dashboard.simulated:
+    if not dashboard.simulated and dashboard.fresh():
         return dashboard.wifi_send({}, "scan", request.app.state.bridge.publish)
-    sent = dashboard.wifi_send({}, "scan", lambda *_: True)
+    sent = dashboard.wifi_send({}, "scan", lambda *_: True, allow_offline=True)
 
     def scan_host():
         result = {"schema_version": 1, **sent, "kind": "scan", "ok": True,
@@ -345,10 +464,47 @@ def wifi_scan(request: Request):
 @app.post("/api/wifi/connect", status_code=202)
 def wifi_connect(data: WifiConnectInput, request: Request):
     local_write(request)
-    if request.app.state.dashboard.simulated:
+    dashboard = request.app.state.dashboard
+    if dashboard.simulated:
         raise HTTPException(409, "SIMULATED_DEVICE")
-    body = {"ssid": data.ssid, "password": data.password}
-    return request.app.state.dashboard.wifi_send(body, "connect", request.app.state.bridge.publish)
+    if dashboard.fresh():
+        body = {"ssid": data.ssid, "password": data.password}
+        return dashboard.wifi_send(body, "connect", request.app.state.bridge.publish)
+    sent = dashboard.wifi_send({}, "connect", lambda *_: True, allow_offline=True)
+
+    def provision_host():
+        ok, reason = _provision_local_uf2(data.ssid, data.password, _detect_lan_ipv4())
+        result = {"schema_version": 1, **sent, "kind": "connect", "ok": ok,
+                  "reason": reason, "ssid": data.ssid, "networks": []}
+        dashboard.wifi_result(json.dumps(result).encode())
+
+    Thread(target=provision_host, daemon=True).start()
+    return sent
+
+
+@app.post("/api/wifi/connect-host", status_code=202)
+def wifi_connect_host(request: Request):
+    local_write(request)
+    dashboard = request.app.state.dashboard
+    if dashboard.simulated:
+        raise HTTPException(409, "SIMULATED_DEVICE")
+    ssid, password = get_current_windows_wifi()
+    if not ssid:
+        raise HTTPException(409, "HOST_WIFI_NOT_CONNECTED")
+    try:
+        validated = WifiConnectInput(ssid=ssid, password=password or "")
+    except ValidationError as err:
+        raise HTTPException(422, "BAD_CREDENTIALS") from err
+    sent = dashboard.wifi_send({}, "connect", lambda *_: True, allow_offline=True)
+
+    def provision_host():
+        ok, reason = _provision_local_uf2(validated.ssid, validated.password, _detect_lan_ipv4())
+        result = {"schema_version": 1, **sent, "kind": "connect", "ok": ok,
+                  "reason": reason, "ssid": validated.ssid, "networks": []}
+        dashboard.wifi_result(json.dumps(result).encode())
+
+    Thread(target=provision_host, daemon=True).start()
+    return {"request_id": sent["request_id"], "ssid": validated.ssid}
 
 
 @app.get("/api/runs")

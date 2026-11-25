@@ -1,6 +1,8 @@
 """Read nearby Windows WLAN networks without changing the PC's connection."""
 import ctypes as ct
 import os
+import re
+import subprocess
 from threading import Event
 
 
@@ -99,3 +101,46 @@ def scan_windows_networks():
         if interfaces:
             wlan.WlanFreeMemory(interfaces)
         wlan.WlanCloseHandle(handle, None)
+
+
+_SSID_RE = re.compile(r"^\s*SSID\s*:\s*(.+?)\s*$", re.MULTILINE)
+_KEY_RE = re.compile(r"^\s*Key Content\s*:\s*(.*?)\s*$", re.MULTILINE)
+
+
+def get_current_windows_ssid() -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        proc = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    m = _SSID_RE.search(proc.stdout or "")
+    ssid = m.group(1).strip() if m else ""
+    return ssid or None
+
+
+def get_current_windows_wifi() -> tuple[str | None, str | None]:
+    ssid = get_current_windows_ssid()
+    if not ssid:
+        return None, None
+    try:
+        proc = subprocess.run(
+            ["netsh", "wlan", "show", "profile", f"name={ssid}", "key=clear"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ssid, None
+    if proc.returncode != 0:
+        return ssid, ""
+    m = _KEY_RE.search(proc.stdout or "")
+    return ssid, (m.group(1) if m else "")
+
