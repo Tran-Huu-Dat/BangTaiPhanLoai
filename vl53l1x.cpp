@@ -215,6 +215,10 @@ bool VL53L1X::init(bool io_2v8) {
     sleep_ms(2);
     writeReg(0x0000, 0x01);
     sleep_ms(5);
+    i2c_error = false;
+    init_diagnostic.i2c_operation = nullptr;
+    init_diagnostic.i2c_register = 0;
+    init_diagnostic.i2c_result = 0;
 
     // 3. Cho chip boot xong (FIRMWARE_SYSTEM_STATUS 0x00E5 == 0x03)
     bool booted = false;
@@ -227,6 +231,10 @@ bool VL53L1X::init(bool io_2v8) {
         sleep_ms(1);
     }
     if (!booted) return false;
+    i2c_error = false;
+    init_diagnostic.i2c_operation = nullptr;
+    init_diagnostic.i2c_register = 0;
+    init_diagnostic.i2c_result = 0;
 
     // 4. Nap bang 91 byte cau hinh vao 0x002D
     if (!i2c_error) init_diagnostic.stage = "FIRST_MEASUREMENT";
