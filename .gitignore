@@ -1,3 +1,7 @@
 build
 !.vscode/*
-docs
+.omc/
+__pycache__/
+*.pyc
+dashboard.zip
+docs/*.docx
