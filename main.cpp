@@ -21,6 +21,11 @@
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include "pico/cyw43_arch.h"
+#include "pico/flash.h"
+#include "pico/multicore.h"
+#include "pico/util/queue.h"
+#include "pegatron_monitor.h"
+#include "pegatron_local_config.h"
 #include "vl53l1x.h"
 
 // ======================= CAU HINH CHAN =======================
@@ -88,7 +93,11 @@ struct Station {
     uint8_t       q_head;
     uint8_t       q_tail;
     uint8_t       q_count;
+    uint32_t      push_count;
 };
+
+// Web dashboard can pause sorting (belt keeps being measured, solenoids stay off).
+static bool sorting_enabled = true;
 
 static VL53L1X tof1(TOF1_I2C);
 static VL53L1X tof2(TOF2_I2C);
@@ -140,6 +149,7 @@ static void solenoidInit(uint pin) {
 
 static void solenoidSet(Station &s, bool on) {
     gpio_put(s.sol_pin, on ? 1 : 0);
+    if (on) ++s.push_count;
     printf("[%s] Solenoid (GP%u) -> %s | d=%u mm | Tong: %lu\n",
            s.name, s.sol_pin, on ? "HUT (ON)" : "NHA (OFF)", s.distance_mm, (unsigned long)s.total_count);
 }
@@ -157,6 +167,8 @@ static void i2cBusInit(Station &s) {
 
 static bool tofInit(Station &s) {
     s.last_retry_ms = millis();
+    i2cBusInit(s);
+    sleep_us(10);
     const unsigned sda_idle = gpio_get(s.sda_pin);
     const unsigned scl_idle = gpio_get(s.scl_pin);
     s.sensor_initialized = s.tof->init(true);
@@ -252,7 +264,7 @@ static void stationUpdate(Station &s) {
     bool object_cleared  = (s.clear_count >= CLEAR_COUNT);
 
     // 3. Phat hien vat moi -> dua vao hang doi (Queue)
-    if (s.state == ST_IDLE && object_detected) {
+    if (sorting_enabled && s.state == ST_IDLE && object_detected) {
         s.total_count++;
         printf("[%s] PHAT HIEN VAT #%lu: d=%u mm (size %u-%u mm)\n",
                s.name, (unsigned long)s.total_count, s.distance_mm, s.min_mm, s.max_mm);
@@ -351,6 +363,121 @@ static void printStatus() {
 // =====================================================================
 //                       MAIN
 // =====================================================================
+// Only core 0 reads the stations or changes an output. Core 1 owns CYW43/lwIP.
+static queue_t snapshot_queue, command_queue, ack_queue;
+alignas(32) static uint32_t network_stack[2048];
+
+// One rule set for both the permissions shown on the web and the checks before acting.
+static const char *denyReason(pegatron_action action, unsigned station) {
+    switch (action) {
+    case PEGATRON_ENABLE:    return sorting_enabled ? "ALREADY_SORTING" : nullptr;
+    case PEGATRON_PAUSE:     return sorting_enabled ? nullptr : "ALREADY_PAUSED";
+    case PEGATRON_TEST: {
+        const Station &s = stations[station - 1];
+        if (sorting_enabled) return "SORTING_ACTIVE";
+        if (!s.sensor_ok) return "TOF_UNAVAILABLE";
+        return s.state == ST_IDLE ? nullptr : "STATION_BUSY";
+    }
+    default:                 return "NOT_SUPPORTED";
+    }
+}
+
+static void answerCommand(const pegatron_command &command, const char *reason) {
+    pegatron_ack ack{};
+    snprintf(ack.request_id, sizeof ack.request_id, "%s", command.request_id);
+    snprintf(ack.reason, sizeof ack.reason, "%s", reason ? reason : "OK");
+    ack.executed = reason == nullptr;
+    ack.mode = sorting_enabled ? PEGATRON_SORTING : PEGATRON_IDLE;  // Read back after acting.
+    queue_try_add(&ack_queue, &ack);
+}
+
+static void runCommands() {
+    pegatron_command command;
+    while (queue_try_remove(&command_queue, &command)) {
+        const char *reason = denyReason(command.action, command.station);
+        if (!reason) {
+            const uint32_t now = millis();
+            if (command.action == PEGATRON_ENABLE) {
+                sorting_enabled = true;
+            } else if (command.action == PEGATRON_PAUSE) {
+                sorting_enabled = false;
+                for (Station &s : stations) {  // Release at once, drop pending delayed pushes.
+                    s.q_count = s.q_head = s.q_tail = 0;
+                    if (s.state == ST_ACTIVE) {
+                        solenoidSet(s, false);
+                        s.state = ST_WAIT_CLEAR;
+                    }
+                }
+            } else {  // PEGATRON_TEST: one normal pulse; the state machine ends it.
+                Station &s = stations[command.station - 1];
+                solenoidSet(s, true);
+                s.state = ST_ACTIVE;
+                s.state_start_ms = now;
+            }
+        }
+        answerCommand(command, reason);
+    }
+}
+
+static pegatron_snapshot makeSnapshot() {
+    const int references[] = {PEGATRON_REFERENCE_1_MM, PEGATRON_REFERENCE_2_MM};
+    pegatron_snapshot snapshot{};
+    snapshot.mode = sorting_enabled ? PEGATRON_SORTING : PEGATRON_IDLE;
+    snapshot.deny[0] = denyReason(PEGATRON_ENABLE, 0);
+    snapshot.deny[1] = denyReason(PEGATRON_PAUSE, 0);
+    snapshot.deny[2] = denyReason(PEGATRON_TEST, 1);
+    snapshot.deny[3] = denyReason(PEGATRON_TEST, 2);
+    snapshot.deny[4] = snapshot.deny[5] = denyReason(PEGATRON_CALIBRATE, 0);
+    for (unsigned i = 0; i < 2; ++i) {
+        const Station &source = stations[i];
+        pegatron_station &target = snapshot.station[i];
+        const bool valid = source.sensor_ok && source.has_valid_target;
+        const int height = references[i] - source.distance_mm;
+        target.sample_valid = target.distance_known = valid;
+        target.distance_mm = source.distance_mm;
+        target.push_count = source.push_count;
+        target.reference_known = references[i] > 0;
+        target.reference_mm = references[i];
+        target.height_known = valid && target.reference_known && height >= -2000 && height <= 2000;
+        target.height_mm = target.height_known ? height : 0;
+        snapshot.tof_unavailable[i] = !source.sensor_ok;
+    }
+    return snapshot;
+}
+
+static void networkWorker() {
+    const pegatron_settings settings = {
+        "pico-01", PEGATRON_WIFI_SSID, PEGATRON_WIFI_PASSWORD, PEGATRON_BROKER_IPV4,
+        "pico-01", PEGATRON_MQTT_PASSWORD, 1883, &command_queue, &ack_queue
+    };
+    if (!pegatron_monitor_init(&settings)) {
+        while (true) sleep_ms(1000);
+    }
+    pegatron_snapshot snapshot{};
+    pegatron_snapshot next{};
+    bool have_snapshot = false;
+    uint32_t last_blink = 0;
+    bool led_state = false;
+    while (true) {
+        bool changed = false;
+        while (queue_try_remove(&snapshot_queue, &next)) {
+            changed |= !have_snapshot || next.mode != snapshot.mode ||
+                next.tof_unavailable[0] != snapshot.tof_unavailable[0] ||
+                next.tof_unavailable[1] != snapshot.tof_unavailable[1];
+            snapshot = next;
+            have_snapshot = true;
+        }
+        if (have_snapshot) pegatron_monitor_tick(&snapshot, changed);
+        const uint32_t now = millis();
+        if (now - last_blink >= 500) {
+            last_blink = now;
+            led_state = !led_state;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
+        }
+        sleep_ms(2);
+    }
+}
+
 int main() {
     stdio_init_all();
 
@@ -358,8 +485,6 @@ int main() {
     printf("\n=======================================================\n");
     printf("   BANG TAI PHAN LOAI TU DONG - Raspberry Pi Pico 2 W   \n");
     printf("=======================================================\n");
-
-    bool led_ok = (cyw43_arch_init() == 0);
 
     for (int i = 0; i < 2; i++) {
         Station &s = stations[i];
@@ -369,12 +494,18 @@ int main() {
         s.total_count = 0;
         s.q_head = s.q_tail = s.q_count = 0;
         solenoidInit(s.sol_pin);
-        i2cBusInit(s);
         tofInit(s);
     }
 
-    uint32_t last_print = 0, last_blink = 0;
-    bool led_state = false;
+    const bool network_enabled = PEGATRON_WIFI_SSID[0] != '\0';
+    if (network_enabled) {
+        queue_init(&snapshot_queue, sizeof(pegatron_snapshot), 4);
+        queue_init(&command_queue, sizeof(pegatron_command), 4);
+        queue_init(&ack_queue, sizeof(pegatron_ack), 4);
+        flash_safe_execute_core_init();  // Lets core 1 save Wi-Fi credentials to flash.
+        multicore_launch_core1_with_stack(networkWorker, network_stack, sizeof network_stack);
+    }
+    uint32_t last_print = 0, last_snapshot = 0;
 
     while (true) {
         stationUpdate(stations[0]);
@@ -385,10 +516,11 @@ int main() {
             last_print = now;
             printStatus();
         }
-        if (led_ok && now - last_blink >= 500) {
-            last_blink = now;
-            led_state = !led_state;
-            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
+        if (network_enabled) runCommands();
+        if (network_enabled && now - last_snapshot >= 100) {
+            last_snapshot = now;
+            const auto snapshot = makeSnapshot();
+            queue_try_add(&snapshot_queue, &snapshot);
         }
     }
 }

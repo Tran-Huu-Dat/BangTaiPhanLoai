@@ -35,7 +35,12 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(BangTaiPhanLoai main.cpp vl53l1x.cpp)
+set(PEGATRON_IOT_DIR "${CMAKE_CURRENT_LIST_DIR}/dashboard" CACHE PATH "Dashboard project")
+set(PEGATRON_FIRMWARE_DIR "${PEGATRON_IOT_DIR}/firmware")
+include("${PEGATRON_FIRMWARE_DIR}/configure.cmake")
+
+add_executable(BangTaiPhanLoai main.cpp vl53l1x.cpp
+    "${PEGATRON_FIRMWARE_DIR}/pegatron_monitor.c")
 
 pico_set_program_name(BangTaiPhanLoai "BangTaiPhanLoai")
 pico_set_program_version(BangTaiPhanLoai "0.1")
@@ -51,13 +56,20 @@ target_link_libraries(BangTaiPhanLoai
 # Add the standard include files to the build
 target_include_directories(BangTaiPhanLoai PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${PEGATRON_FIRMWARE_DIR}
 )
 
 # Add any user requested libraries
 target_link_libraries(BangTaiPhanLoai 
         hardware_i2c
         hardware_timer
-        pico_cyw43_arch_none
+        pico_cyw43_arch_lwip_poll
+        pico_lwip_mqtt
+        pico_multicore
+        pico_flash
+        hardware_flash
+        pico_rand
         )
 
 pico_add_extra_outputs(BangTaiPhanLoai)
