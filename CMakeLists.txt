@@ -63,6 +63,8 @@ target_include_directories(BangTaiPhanLoai PRIVATE
 # Add any user requested libraries
 target_link_libraries(BangTaiPhanLoai 
         hardware_i2c
+        hardware_pwm
+        hardware_clocks
         hardware_timer
         pico_cyw43_arch_lwip_poll
         pico_lwip_mqtt
@@ -79,4 +81,16 @@ target_link_libraries(TestToF PRIVATE pico_stdlib hardware_i2c)
 pico_enable_stdio_uart(TestToF 0)
 pico_enable_stdio_usb(TestToF 1)
 pico_add_extra_outputs(TestToF)
+
+add_executable(TestServoTram1 station1_servo_trial.cpp vl53l1x.cpp)
+target_link_libraries(TestServoTram1 PRIVATE pico_stdlib hardware_i2c hardware_pwm hardware_clocks)
+pico_enable_stdio_uart(TestServoTram1 0)
+pico_enable_stdio_usb(TestServoTram1 1)
+pico_add_extra_outputs(TestServoTram1)
+
+add_executable(TestTwoServos test_two_servos.cpp)
+target_link_libraries(TestTwoServos PRIVATE pico_stdlib hardware_pwm hardware_clocks)
+pico_enable_stdio_uart(TestTwoServos 0)
+pico_enable_stdio_usb(TestTwoServos 1)
+pico_add_extra_outputs(TestTwoServos)
 

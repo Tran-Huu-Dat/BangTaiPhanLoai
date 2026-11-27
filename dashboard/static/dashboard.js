@@ -62,18 +62,27 @@ function write(id, text) {
 }
 
 for (const i of [1, 2]) {
+  const targetSize = i === 1 ? "L" : "M";
+  const targetClass = i === 1 ? "l" : "m";
   $("stations").insertAdjacentHTML("beforeend", `
     <article class="station">
-      <div class="station-head"><h3>Trạm ${i} · Gạt ${i === 1 ? "S" : "M"}</h3><span class="badge neutral" id="home-${i}">HOME chưa rõ</span></div>
+      <div class="station-head"><h3>Trạm ${i} · <span class="${targetClass}">Gạt ${targetSize}</span></h3><span class="badge neutral" id="home-${i}">HOME chưa rõ</span></div>
       <dl class="station-values">
-        <div><dt id="measure-label-${i}">Chiều cao</dt><dd id="height-${i}">—</dd><dd class="sample" id="valid-${i}"></dd></div>
+        <div><dt id="measure-label-${i}">Chiều cao</dt><dd class="metric-big" id="height-${i}">—</dd><dd class="sample" id="valid-${i}"></dd></div>
+        <div><dt>Khoảng cách ToF</dt><dd class="metric-sub" id="distance-${i}">—</dd></div>
         <div><dt>Nhịp gạt</dt><dd id="push-${i}">—</dd></div>
         <div><dt>Mốc mặt băng</dt><dd id="reference-${i}">—</dd></div>
       </dl>
+      <div class="meter" aria-hidden="true"><div class="meter-fill meter-${targetClass}" id="meter-${i}"></div></div>
     </article>`);
 }
 for (const [tray, label] of [["S", "Thấp"], ["M", "Trung bình"], ["L", "Cao"]]) {
-  $("counts").insertAdjacentHTML("beforeend", `<div><dt><span class="tray">${tray}</span>${label}</dt><dd id="tray-${tray}">—</dd></div>`);
+  $("counts").insertAdjacentHTML("beforeend", `
+    <div class="tray-card tray-card-${tray}">
+      <dt><span class="tray tray-${tray}">${tray}</span>${label}</dt>
+      <dd id="tray-${tray}">—</dd>
+      <div class="share-bar" aria-hidden="true"><div class="share-fill share-${tray}" id="share-${tray}"></div></div>
+    </div>`);
 }
 
 const controls = [
@@ -148,10 +157,14 @@ function renderStatus() {
   source.hidden = !state;
   source.className = "badge " + (state?.simulated ? "warning" : "neutral");
   write("source", state?.simulated ? "GIẢ LẬP" : state?.device_id || "");
-  write("updated", state?.received_at ? "Cập nhật " + dateTime.format(state.received_at * 1000) : "Đang chờ dữ liệu thiết bị");
+  const seqText = sample?.seq != null ? ` · Gói #${sample.seq}` : "";
+  write("updated", state?.received_at ? "Cập nhật " + dateTime.format(state.received_at * 1000) + seqText : "Đang chờ dữ liệu thiết bị");
   write("mode", sample ? modes[sample.mode] : "—");
+  const modeNode = $("mode");
+  modeNode.className = sample ? (sample.mode === "sorting" ? "mode-sorting" : sample.mode === "fault" ? "mode-fault" : "mode-idle") : "";
   write("estop", sample?.estop == null ? "Chưa có phản hồi" : sample.estop ? "Đang tác động" : "Sẵn sàng");
   write("faults", sample ? sample.faults.map(describe).join(" · ") || "Không có lỗi" : "—");
+  $("faults").className = sample?.faults?.length ? "fault-active" : "";
   for (const i of [1, 2]) {
     const station = sample?.[`station_${i}`];
     const home = station?.home;
@@ -159,18 +172,29 @@ function renderStatus() {
     write(`home-${i}`, home == null ? "HOME chưa rõ" : home ? "Đã về HOME" : "Ngoài HOME");
     const rawOnly = station?.height_mm == null && station?.distance_mm != null;
     write(`measure-label-${i}`, rawOnly ? "Khoảng cách ToF" : "Chiều cao");
-    write(`height-${i}`, value(rawOnly ? station.distance_mm : station?.height_mm, " mm"));
+    const displayHeight = station?.height_mm == null ? null : Math.max(0, station.height_mm);
+    const metricVal = rawOnly ? station.distance_mm : displayHeight;
+    write(`height-${i}`, value(metricVal, " mm"));
+    write(`distance-${i}`, value(station?.distance_mm, " mm"));
     write(`valid-${i}`, station ? station.sample_valid ? "Mẫu hợp lệ" : "Mẫu không hợp lệ" : "");
     write(`push-${i}`, value(station?.push_count));
     write(`reference-${i}`, value(station?.reference_mm, " mm"));
+    const pct = metricVal == null ? 0 : Math.max(0, Math.min(100, (metricVal / 100) * 100));
+    $(`meter-${i}`).style.width = `${pct}%`;
+    const active = Boolean(station?.sample_valid) && (rawOnly ? station.distance_mm < 77 : (station.height_mm ?? 0) > 5);
+    $(`belt-node-${i}`)?.classList.toggle("active", active);
   }
   const run = state?.active_run;
   write("count-scope", run ? `Số đếm xác nhận từ đầu buổi chạy · ${run.name}` : "Số đếm cộng dồn từ phiên thiết bị.");
+  const countMap = run ? state.run_counts : sample?.trays;
+  const totalCount = trays.reduce((sum, tray) => sum + (Number(countMap?.[tray]) || 0), 0);
   for (const tray of trays) {
-    const n = (run ? state.run_counts : sample?.trays)?.[tray];
+    const n = countMap?.[tray];
     const missing = Boolean(sample) && n == null;
     $(`tray-${tray}`).classList.toggle("missing", missing);
     write(`tray-${tray}`, missing ? "Chưa xác nhận" : value(n));
+    const sharePct = totalCount > 0 && n != null ? Math.round((Number(n) / totalCount) * 100) : 0;
+    $(`share-${tray}`).style.width = `${sharePct}%`;
   }
   $("run-name").disabled = Boolean(run) || runSaving;
   $("start-run").hidden = Boolean(run);
@@ -346,6 +370,112 @@ $("run-filter").addEventListener("change", event => {
   refreshHistory();
 });
 
+let configDirty = false;
+
+function stationH0(index) {
+  return state?.snapshot?.[`station_${index}`]?.reference_mm ?? 82;
+}
+
+function readConfigInputs() {
+  const lMin = Number($("cfg-l-min").value);
+  const lMax = Number($("cfg-l-max").value);
+  const mMin = Number($("cfg-m-min").value);
+  const mMax = Number($("cfg-m-max").value);
+  return {
+    lMin,
+    lMax,
+    mMin,
+    mMax,
+    payload: {
+      l_min_mm: Math.round(lMin * 10) / 10,
+      l_max_mm: Math.round(lMax * 10) / 10,
+      m_min_mm: Math.round(mMin * 10) / 10,
+      m_max_mm: Math.round(mMax * 10) / 10,
+      station_1_on_ms: Math.round(Number($("cfg-s1-on").value)),
+      station_1_delay_ms: 0,
+      station_2_on_ms: Math.round(Number($("cfg-s2-on").value)),
+      station_2_delay_ms: 0,
+      min_off_ms: 120,
+    },
+  };
+}
+
+function updateConfigPreview() {
+  const {lMin, lMax, mMin, mMax} = readConfigInputs();
+  if (!Number.isFinite(lMin) || !Number.isFinite(lMax) || lMin < 0 || lMin >= lMax || lMax > 300) {
+    write("cfg-preview", "Trạm 1 (L): nhập chiều cao hợp lệ 0 ≤ từ < đến ≤ 300 mm.");
+    return;
+  }
+  if (!Number.isFinite(mMin) || !Number.isFinite(mMax) || mMin < 0 || mMin >= mMax || mMax > 300) {
+    write("cfg-preview", "Trạm 2 (M): nhập chiều cao hợp lệ 0 ≤ từ < đến ≤ 300 mm.");
+    return;
+  }
+  const h01 = stationH0(1);
+  const h02 = stationH0(2);
+  const tofLMin = Math.max(0, Math.round((h01 - lMax) * 10) / 10);
+  const tofLMax = Math.max(0, Math.round((h01 - lMin) * 10) / 10);
+  const tofMMin = Math.max(0, Math.round((h02 - mMax) * 10) / 10);
+  const tofMMax = Math.max(0, Math.round((h02 - mMin) * 10) / 10);
+  let bandNote = "· Ngoài hai khoảng (S) đi thẳng cuối băng.";
+  if (mMax < lMin) {
+    bandNote = `· Khe đệm chống sai số ToF (${numbers.format(mMax)}–${numbers.format(lMin)} mm) đi thẳng không gạt.`;
+  } else if (mMax > lMin) {
+    bandNote = `· Lưu ý: khoảng M và L đang chồng nhau (${numbers.format(lMin)}–${numbers.format(mMax)} mm) — Trạm 1 ưu tiên gạt L trước.`;
+  }
+  write(
+    "cfg-preview",
+    `Trạm 1 gạt L: cao ${numbers.format(lMin)}–${numbers.format(lMax)} mm (ToF ~${numbers.format(tofLMin)}–${numbers.format(tofLMax)} mm theo H0₁=${numbers.format(h01)} mm) · ` +
+    `Trạm 2 gạt M: cao ${numbers.format(mMin)}–${numbers.format(mMax)} mm (ToF ~${numbers.format(tofMMin)}–${numbers.format(tofMMax)} mm theo H0₂=${numbers.format(h02)} mm) ${bandNote}`
+  );
+}
+
+async function loadConfig() {
+  try {
+    const cfg = await api("/api/config");
+    $("cfg-l-min").value = cfg.l_min_mm;
+    $("cfg-l-max").value = cfg.l_max_mm;
+    $("cfg-m-min").value = cfg.m_min_mm;
+    $("cfg-m-max").value = cfg.m_max_mm;
+    $("cfg-s1-on").value = cfg.station_1_on_ms;
+    $("cfg-s2-on").value = cfg.station_2_on_ms;
+    configDirty = false;
+    updateConfigPreview();
+  } catch (error) {
+    write("cfg-feedback", describe(error.message));
+  }
+}
+
+$("config-form").addEventListener("input", () => {
+  configDirty = true;
+  updateConfigPreview();
+});
+$("config-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const {lMin, lMax, mMin, mMax, payload} = readConfigInputs();
+  if (!Number.isFinite(lMin) || !Number.isFinite(lMax) || lMin < 0 || lMin >= lMax || lMax > 300) {
+    write("cfg-feedback", "Lỗi: Khoảng chiều cao Trạm 1 (L) phải thỏa 0 ≤ từ < đến ≤ 300 mm.");
+    return;
+  }
+  if (!Number.isFinite(mMin) || !Number.isFinite(mMax) || mMin < 0 || mMin >= mMax || mMax > 300) {
+    write("cfg-feedback", "Lỗi: Khoảng chiều cao Trạm 2 (M) phải thỏa 0 ≤ từ < đến ≤ 300 mm.");
+    return;
+  }
+  $("cfg-save").disabled = true;
+  write("cfg-feedback", "Đang lưu cấu hình…");
+  try {
+    const res = await api("/api/config", payload);
+    configDirty = false;
+    write(
+      "cfg-feedback",
+      res.published ? "Đã lưu và áp dụng ngay xuống mạch Pico." : "Đã lưu cấu hình (sẽ tự nạp khi mạch kết nối)."
+    );
+  } catch (error) {
+    write("cfg-feedback", describe(error.message));
+  } finally {
+    $("cfg-save").disabled = false;
+  }
+});
+
 async function poll() {
   const started = performance.now();
   try {
@@ -355,12 +485,14 @@ async function poll() {
     requestOffline = true;
   }
   renderStatus();
+  updateConfigPreview();
   setTimeout(poll, Math.max(150, 1000 - (performance.now() - started)));
 }
 
 new ResizeObserver(() => {
   if (chartData) draw(chartData);
 }).observe($("chart"));
+loadConfig();
 poll();
 refreshHistory();
 setInterval(refreshHistory, 3000);
