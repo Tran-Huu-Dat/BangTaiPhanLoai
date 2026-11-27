@@ -24,7 +24,7 @@ STATUS_RE = re.compile(
 DIST_RE = re.compile(r"d=\s*(?P<dist>----|\d+)mm\s*\[\s*(?P<state>[A-Z0-9_?]+)\s*\|\s*#\s*(?P<count>\d+)\]")
 PASS_S_RE = re.compile(r"\[TRAM2\]\s+QUA TRAM:.*size=S\s*->\s*PASS")
 CALIB_C1_RE = re.compile(r"\[TRAM(?P<st>[12])\]\s+CALIB C1\b.*H0=(?P<h0>[0-9.]+)mm")
-TEST_ACT_RE = re.compile(r"\[TRAM(?P<st>[12])\]\s+Solenoid\b.*->\s*HUT \(ON\)")
+TEST_ACT_RE = re.compile(r"\[TRAM(?P<st>[12])\]\s+TEST: servo day\b")
 
 
 def _perm(allowed: bool, reason: str = "OK") -> dict[str, Any]:
@@ -48,9 +48,9 @@ def format_config_command(cfg: dict[str, Any]) -> bytes | None:
         0.0 <= l_min < l_max <= 300.0
         and 0.0 <= m_min < m_max <= 300.0
         and 50 <= s1_on <= 600
-        and 0 <= s1_td <= 3000
+        and s1_td == 0
         and 50 <= s2_on <= 600
-        and 0 <= s2_td <= 3000
+        and s2_td == 0
         and 40 <= min_off <= 500
     ):
         return None

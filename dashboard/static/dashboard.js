@@ -392,10 +392,10 @@ function readConfigInputs() {
       m_min_mm: Math.round(mMin * 10) / 10,
       m_max_mm: Math.round(mMax * 10) / 10,
       station_1_on_ms: Math.round(Number($("cfg-s1-on").value)),
-      station_1_delay_ms: Math.round(Number($("cfg-s1-delay").value)),
+      station_1_delay_ms: 0,
       station_2_on_ms: Math.round(Number($("cfg-s2-on").value)),
-      station_2_delay_ms: Math.round(Number($("cfg-s2-delay").value)),
-      min_off_ms: Math.round(Number($("cfg-min-off").value)),
+      station_2_delay_ms: 0,
+      min_off_ms: 120,
     },
   };
 }
@@ -437,10 +437,7 @@ async function loadConfig() {
     $("cfg-m-min").value = cfg.m_min_mm;
     $("cfg-m-max").value = cfg.m_max_mm;
     $("cfg-s1-on").value = cfg.station_1_on_ms;
-    $("cfg-s1-delay").value = cfg.station_1_delay_ms;
     $("cfg-s2-on").value = cfg.station_2_on_ms;
-    $("cfg-s2-delay").value = cfg.station_2_delay_ms;
-    $("cfg-min-off").value = cfg.min_off_ms;
     configDirty = false;
     updateConfigPreview();
   } catch (error) {

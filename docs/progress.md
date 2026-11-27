@@ -1,5 +1,12 @@
 # Tiến độ dự án BangTaiPhanLoai
 
+## Servo đẩy trạm 2 (`D-15`) — 2026-11-26
+
+- [x] Firmware C++ dùng servo GP11 + LM393 GP13 cho trạm 2, giữ GP10/GP12 cho trạm 1; cấu hình PWM chung slice và FIFO riêng từng trạm.
+- [x] Dashboard chỉ cho chỉnh thời gian đẩy hai servo; độ trễ gạt bằng 0, ẩn cấu hình hồi solenoid cũ; README có sơ đồ chân và quy trình hiệu chỉnh.
+- [x] Kiểm tra: build firmware bằng Pico SDK, biên dịch `static_assert` C++ bằng ARM toolchain, `node --check` và 20 test dashboard Python.
+- [~] Nạp UF2, đấu dây, kiểm tra cực tính LM393, hành trình HOME/PUSH và phôi S/M/L trên băng tải: người dùng sẽ tự thực hiện.
+
 ## Đợt M4 + USB Bridge + Web Config (`D-12`..`D-14`) — 2026-11-25
 
 - [x] **Sửa gạt mẫu gần 2–3 cm & I2C ToF:** `SolenoidActuator` thêm `min_off_time_ms` (120 ms) bảo đảm nhả hồi giữa 2 nhịp; `vl53l1x.cpp` xóa cờ `i2c_error` sau soft-reset `0x0000`; ToF chạy `15 ms`, `CLEAR_COUNT=1`, `DETECT=6 mm`, `CLEAR=5 mm`.

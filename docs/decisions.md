@@ -18,6 +18,7 @@ Nguồn: README.md, `main.cpp` (commit `e181c00`), `CMakeLists.txt`, `docs/confl
 | D-12 | Dừng xử lý phần tính/ước lượng tốc độ băng tải (không dùng `VelocityEstimator` / `compute_v12_mm_s` trong runtime); giữ gạt trực tiếp theo `travel_delay_ms` cố định/nhập tay từ web (mặc định `0 ms`). | Người dùng chốt 2026-11-25 |
 | D-13 | Đổi thứ tự phân loại từ cao xuống thấp (`L → M → S`): Trạm 1 gạt `L`, Trạm 2 gạt `M`, `S` đi thẳng cuối băng không cần đẩy (thay thế `D-11`). | Người dùng chốt 2026-11-25 |
 | D-14 | Tách cấu hình hai trạm thành hai khoảng chiều cao vật độc lập (`L=[l_min_mm, l_max_mm]`, `M=[m_min_mm, m_max_mm]`) tính theo `H0` riêng từng cảm biến, không ép hai ô dính nhau hay ràng buộc `H0` trên Web UI, cho phép tạo khe đệm chống nhiễu ToF (vật rơi vào khe đệm/ngoài khoảng trả về `S` đi thẳng). | Người dùng chốt 2026-11-25 |
+| D-15 | Thay cơ cấu đẩy trạm 2 bằng servo GP11 + LM393 DO GP13 theo luồng ToF → LM393 → servo của trạm 1; hai servo dùng chung PWM slice nhưng có kênh và gate riêng. Giữ phân loại L/M/S và cách đo ToF từng trạm; độ trễ gạt bằng 0. Thay thế phần đấu solenoid/L298N của D-05 trong firmware C++. | Người dùng yêu cầu 2026-11-26; `main.cpp`, README |
 
 ## Chưa xác nhận
 - Chạy trên Pico thật với dashboard: mới có build firmware (Pico SDK 2.3.1) và 10 test backend đạt.

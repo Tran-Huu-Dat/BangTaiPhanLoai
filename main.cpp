@@ -5,19 +5,16 @@
  *  Phan cung:
  *    - ToF 1 (VL53L1X) : I2C0  SDA=GP0, SCL=GP1, LPN=3V3 -> Tram 1
  *    - ToF 2 (VL53L1X) : I2C1  SDA=GP6, SCL=GP7, LPN=3V3 -> Tram 2
- *    - Servo SG90 T1   : GP10 PWM 50 Hz (nguon 5V rieng, GND chung) - thay Solenoid 1
- *    - LM393 T1 (DO)   : GP12 - xac nhan phoi toi vi tri day (cuc tinh: LM393_ACTIVE_LOW)
- *    - Solenoid 2      : GP11 (HIGH = hut, LOW = nha) qua L298N IN3
+ *    - Servo T1/T2     : GP10/GP11 PWM 50 Hz (nguon 5V rieng, GND chung)
+ *    - LM393 T1/T2 DO  : GP12/GP13 - xac nhan phoi tai vi tri day
  *
  *  Logic:
  *    - 2 tram chay DOC LAP va DONG THOI, khong chan CPU (Non-blocking).
- *    - Tram 1: size L (mac dinh cao 22-100mm) -> ToF xac dinh L, cho LM393 xac nhan vi tri
- *      (chong nhieu), SG90 day SERVO_PUSH_MS roi ve nghi. Timeout/mat ToF/tat he thong -> ve nghi.
- *    - Tram 2: size M (mac dinh cao 7-20mm) -> kich Solenoid 2 roi nha.
+ *    - Tram 1 day L; tram 2 day M. ToF chot kich thuoc, LM393 xac nhan vi tri,
+ *      servo day trong on_time_ms roi ve HOME. Mat ToF/tam dung -> HOME.
  *    - Size S va vung dem giua hai khoang di thang qua ca hai tram (khong day).
  *    - Nguong va thoi gian gat co the chinh truc tiep tu Web Dashboard.
- *    - L298N: IN2/IN4 noi GND, ENA/ENB bat, GND chung voi Pico.
- *    - Co bo dem san pham phan loai, loc nhieu (debounce), chong hut lap.
+ *    - Co bo dem san pham phan loai, loc nhieu (debounce), chong day lap.
  * =====================================================================
  */
 #include <stdio.h>
@@ -61,25 +58,29 @@
 #define TOF2_SDA_PIN    6
 #define TOF2_SCL_PIN    7
 
-#define SOL1_PIN        10     // Tram 1: chan tin hieu PWM cua SG90 (KHONG con la solenoid)
-#define SOL2_PIN        11
-#define LM393_PIN       12     // Tram 1: DO cua LM393 xac nhan phoi o vi tri day
+#define SOL1_PIN        10     // Servo tram 1
+#define SOL2_PIN        11     // Servo tram 2; chung PWM slice voi GP10
+#define LM393_1_PIN     12
+#define LM393_2_PIN     13
 
 #define I2C_BAUDRATE    (100 * 1000)   // 100 kHz, da thu voi hai cam bien
 
-// ===== SG90 + LM393 TRAM 1 (gia tri khoi dau, PHAI hieu chinh tren ban, xem README/bao cao) =====
+// ===== Servo + LM393 hai tram (gia tri khoi dau, PHAI hieu chinh tren ban) =====
 #define LM393_ACTIVE_LOW    1      // 1: co vat -> DO=0. Do bang dong ho roi doi 0/1 neu nguoc.
-#define SERVO_HOME_US       1500   // Xung nghi (us). Chinh khi can day KHONG cham bang tai.
-#define SERVO_PUSH_US       2500   // Xung day (us). Tang tung 50us, KHONG vuot hanh trinh co khi.
+#define SERVO1_HOME_US      1500
+#define SERVO1_PUSH_US      2500
+#define SERVO2_HOME_US      1500   // Hieu chinh rieng: co khi tram 2 co the dao chieu
+#define SERVO2_PUSH_US      2500
 #define SERVO_MIN_US        1000   // Chan an toan: khong bao gio xuat xung ngoai khoang nay
 #define SERVO_MAX_US        2500   // SG90 toi da ~2500us; kiem tra co khi truoc khi tang PUSH
-#define SERVO_PUSH_MS       160    // Giu o vi tri day (SG90 ~150ms/90 do o 5V)
 #define SERVO_RECOVER_MS    150    // Cho servo thu ve het hanh trinh
 #define LM393_CLEAR_MS      30     // Phoi da xu ly phai roi LM393 >= ms nay truoc khi nhan phoi tiep
 #define LM393_STABLE_MS     10     // LM393 phai on dinh ACTIVE >= ms nay (chong nhieu)
 #define LM393_WAIT_LIMIT_MS 1500   // Ket qua ToF trong hang doi qua ms nay chua toi LM393 -> bo
-static_assert(SERVO_HOME_US >= SERVO_MIN_US && SERVO_HOME_US <= SERVO_MAX_US, "HOME ngoai khoang an toan");
-static_assert(SERVO_PUSH_US >= SERVO_MIN_US && SERVO_PUSH_US <= SERVO_MAX_US, "PUSH ngoai khoang an toan");
+static_assert(SERVO1_HOME_US >= SERVO_MIN_US && SERVO1_HOME_US <= SERVO_MAX_US, "HOME1 ngoai khoang an toan");
+static_assert(SERVO1_PUSH_US >= SERVO_MIN_US && SERVO1_PUSH_US <= SERVO_MAX_US, "PUSH1 ngoai khoang an toan");
+static_assert(SERVO2_HOME_US >= SERVO_MIN_US && SERVO2_HOME_US <= SERVO_MAX_US, "HOME2 ngoai khoang an toan");
+static_assert(SERVO2_PUSH_US >= SERVO_MIN_US && SERVO2_PUSH_US <= SERVO_MAX_US, "PUSH2 ngoai khoang an toan");
 
 // ======================= THAM SO HE THONG =======================
 #define BELT_CLEAR_MIN_MM   80     // Mat bang tai 85-90mm; >= 80mm moi cho nhan phoi tiep
@@ -159,9 +160,13 @@ struct Station {
     sorter_core::SolenoidActuator actuator{};
     uint32_t                      missed_count = 0;
     bool                          manual_test_active = false;
-    bool                          servo = false;     // true: tram dung SG90 + LM393 thay solenoid
+    bool                          servo = false;
     Station1TrialGate             servo_gate{};
+    uint                          position_pin = 0;
+    uint16_t                      servo_home_us = SERVO1_HOME_US;
+    uint16_t                      servo_push_us = SERVO1_PUSH_US;
     uint16_t                      servo_us = 0;
+    bool                          position_last_raw = false;
     uint16_t                      raw_mm = 0;          // chan doan: mau ToF tho cuoi cung
     uint8_t                       raw_status = 255;    // chan doan: range_status cuoi cung
     uint32_t                      bad_samples = 0;     // chan doan: so mau khong hop le
@@ -232,7 +237,7 @@ static void solenoidSet(Station &s, bool on) {
            s.name, s.sol_pin, on ? "HUT (ON)" : "NHA (OFF)", s.distance_mm, (unsigned long)s.total_count);
 }
 
-// ---------------------- SG90 + LM393 (tram 1) ----------------------
+// ---------------------- Servo + LM393 (moi tram mot gate rieng) ----------------------
 static void servoWrite(Station &s, uint16_t us) {
     if (us < SERVO_MIN_US) us = SERVO_MIN_US;
     if (us > SERVO_MAX_US) us = SERVO_MAX_US;
@@ -244,51 +249,56 @@ static void servoWrite(Station &s, uint16_t us) {
 static void servoInit(Station &s) {
     gpio_set_function(s.sol_pin, GPIO_FUNC_PWM);
     const uint slice = pwm_gpio_to_slice_num(s.sol_pin);
-    pwm_config config = pwm_get_default_config();
-    pwm_config_set_clkdiv(&config, static_cast<float>(clock_get_hz(clk_sys)) / 1000000.0f);
-    pwm_config_set_wrap(&config, 19999);  // 20 ms period
-    pwm_init(slice, &config, false);
-    pwm_set_gpio_level(s.sol_pin, SERVO_HOME_US);
+    static bool pwm_ready = false;  // GP10/GP11 chung slice: khong reset servo da khoi tao.
+    if (!pwm_ready) {
+        pwm_config config = pwm_get_default_config();
+        pwm_config_set_clkdiv(&config, static_cast<float>(clock_get_hz(clk_sys)) / 1000000.0f);
+        pwm_config_set_wrap(&config, 19999);  // 20 ms period
+        pwm_init(slice, &config, false);
+        pwm_ready = true;
+    }
+    pwm_set_gpio_level(s.sol_pin, s.servo_home_us);
     pwm_set_enabled(slice, true);
-    s.servo_us = SERVO_HOME_US;
+    s.servo_us = s.servo_home_us;
     s.servo_gate = Station1TrialGate{};
     s.servo_gate.position_stable_ms = LM393_STABLE_MS;
     s.servo_gate.wait_limit_ms = LM393_WAIT_LIMIT_MS;
-    s.servo_gate.push_ms = SERVO_PUSH_MS;
+    s.servo_gate.push_ms = s.on_time_ms;
     s.servo_gate.recover_ms = SERVO_RECOVER_MS;
     s.servo_gate.clear_ms = LM393_CLEAR_MS;
-    gpio_init(LM393_PIN);
-    gpio_set_dir(LM393_PIN, GPIO_IN);
-    gpio_pull_up(LM393_PIN);
+    gpio_init(s.position_pin);
+    gpio_set_dir(s.position_pin, GPIO_IN);
+    gpio_pull_up(s.position_pin);
+    s.position_last_raw = gpio_get(s.position_pin);
 }
 
-static bool lm393Raw() { return gpio_get(LM393_PIN); }
-static bool lm393Active() { return lm393Raw() == (LM393_ACTIVE_LOW ? false : true); }
+static bool lm393Raw(const Station &s) { return gpio_get(s.position_pin); }
+static bool lm393Active(const Station &s) { return lm393Raw(s) == (LM393_ACTIVE_LOW ? false : true); }
 
 // Back to HOME and forget any pending item (pause, fault, E-stop, calib, sensor loss).
 static void servoAbort(Station &s) {
     s.servo_gate.reset();
-    servoWrite(s, SERVO_HOME_US);
+    servoWrite(s, s.servo_home_us);
 }
 
 static void servoStep(Station &s, uint32_t now, bool enabled) {
-    static bool last_raw = lm393Raw();  // log moi lan LM393 doi muc de kiem tra cam bien
-    if (lm393Raw() != last_raw) {
-        last_raw = lm393Raw();
-        printf("[LM393] DO=%u -> %s (t=%lu ms)\n", (unsigned)last_raw,
-               lm393Active() ? "CO VAT" : "KHONG VAT", (unsigned long)now);
+    const bool raw = lm393Raw(s);
+    if (raw != s.position_last_raw) {
+        s.position_last_raw = raw;
+        printf("[%s LM393] DO=%u -> %s (t=%lu ms)\n", s.name, (unsigned)raw,
+               lm393Active(s) ? "CO VAT" : "KHONG VAT", (unsigned long)now);
     }
-    switch (s.servo_gate.tick(now, enabled, s.sensor_ok, lm393Active())) {
-    case TrialEvent::Passed:       printf("[%s] LM393 thay phoi M/S -> cho qua (hang doi con %u)\n", s.name, (unsigned)s.servo_gate.q_count); break;
+    switch (s.servo_gate.tick(now, enabled, s.sensor_ok, lm393Active(s))) {
+    case TrialEvent::Passed:       printf("[%s] LM393 thay phoi khong can day -> cho qua (hang doi con %u)\n", s.name, (unsigned)s.servo_gate.q_count); break;
     case TrialEvent::Unmatched:    ++s.missed_count; printf("[%s] CANH BAO: LM393 thay phoi nhung ToF chua do -> KHONG DAY\n", s.name); break;
-    case TrialEvent::Push:        ++s.push_count; printf("[%s] SERVO DAY (%u us) | Tong day: %lu\n", s.name, (unsigned)SERVO_PUSH_US, (unsigned long)s.push_count); break;
+    case TrialEvent::Push:        ++s.push_count; printf("[%s] SERVO DAY (%u us) | Tong day: %lu\n", s.name, (unsigned)s.servo_push_us, (unsigned long)s.push_count); break;
     case TrialEvent::Returned:     printf("[%s] SERVO THU VE, cho vat roi LM393\n", s.name); break;
     case TrialEvent::Ready:        printf("[%s] SAN SANG cho phoi tiep theo\n", s.name); break;
     case TrialEvent::TimedOut:     ++s.missed_count; printf("[%s] CANH BAO: LM393 khong xac nhan trong %u ms -> BO PHOI\n", s.name, (unsigned)LM393_WAIT_LIMIT_MS); break;
     case TrialEvent::SensorLost:   printf("[%s] MAT ToF -> servo ve nghi, khong day\n", s.name); break;
     default: break;
     }
-    servoWrite(s, s.servo_gate.stage == TrialStage::Extended ? SERVO_PUSH_US : SERVO_HOME_US);
+    servoWrite(s, s.servo_gate.stage == TrialStage::Extended ? s.servo_push_us : s.servo_home_us);
 }
 
 // Stop whatever the station is doing (solenoid release or servo home).
@@ -308,8 +318,8 @@ static void stationManualTest(Station &s, uint32_t now) {
         if (!s.servo_gate.force_push(now)) return;
         s.manual_test_active = true;
         ++s.push_count;
-        servoWrite(s, SERVO_PUSH_US);
-        printf("[%s] TEST: servo day (%u us)\n", s.name, (unsigned)SERVO_PUSH_US);
+        servoWrite(s, s.servo_push_us);
+        printf("[%s] TEST: servo day (%u us)\n", s.name, (unsigned)s.servo_push_us);
     } else if (s.actuator.trigger_manual(now, s.on_time_ms)) {
         s.manual_test_active = true;
         const auto on_tick = s.actuator.tick(now, true);
@@ -489,10 +499,12 @@ static void stationUpdate(Station &s) {
                        res.height_mm, sizeName(res.size), (unsigned long)td);
             } else if (res.action == sorter_core::Action::Missed) {
                 ++s.missed_count;
-                printf("[%s] CANH BAO: L lot qua Tram 1 (h=%.1fmm) -> MISSED (khong kich Solenoid)\n",
+                if (s.servo && !s.servo_gate.enqueue(false, now))
+                    printf("[%s] CANH BAO: Hang doi servo day!\n", s.name);
+                printf("[%s] CANH BAO: L lot qua Tram 1 (h=%.1fmm) -> MISSED (khong day)\n",
                        s.name, res.height_mm);
             } else if (res.action == sorter_core::Action::Pass) {
-                if (s.servo && !s.servo_gate.enqueue(false, now))  // giu thu tu: M/S cung chiem 1 cho
+                if (s.servo && !s.servo_gate.enqueue(false, now))  // moi phoi deu chiem 1 cho
                     printf("[%s] CANH BAO: Hang doi servo day!\n", s.name);
                 if (s.detector_cfg.station == 2 && res.size == sorter_core::Size::S) {
                     ++tray_s_count;
@@ -916,9 +928,9 @@ static bool applyStationConfig(double l_min, double l_max, double m_min, double 
                                uint32_t s2_on, uint32_t s2_td, uint32_t min_off) {
     if (l_min < 0.0 || l_min >= l_max || l_max > 300.0 ||
         m_min < 0.0 || m_min >= m_max || m_max > 300.0 ||
-        s1_on < 50 || s1_on > 3000 ||  // tram 1 la servo: s1_on = thoi gian giu day
-        s2_on < 50 || s2_on > SOLENOID_MAX_ON_MS ||
-        s1_td > 3000 || s2_td > 3000 ||
+        s1_on < 50 || s1_on > 600 ||
+        s2_on < 50 || s2_on > 600 ||
+        s1_td != 0 || s2_td != 0 ||  // LM393 xac nhan vi tri; do tre ToF khong dung
         min_off < 40 || min_off > 500) {
         return false;
     }
@@ -927,7 +939,7 @@ static bool applyStationConfig(double l_min, double l_max, double m_min, double 
     for (int i = 0; i < 2; ++i) {
         Station &s = stations[i];
         s.on_time_ms = on_vals[i];
-        if (s.servo) s.servo_gate.push_ms = on_vals[i];  // tram 1: s1_on = thoi gian giu servo o vi tri day
+        if (s.servo) s.servo_gate.push_ms = on_vals[i];
         s.travel_delay_ms = td_vals[i];
         s.geometry.fallback_delay_ms = td_vals[i];
         s.detector_cfg.use_ranges = true;
@@ -1047,12 +1059,14 @@ static void handleSerialCommands() {
                (unsigned)stations[0].raw_mm, (unsigned)stations[0].raw_status,
                (unsigned long)stations[0].bad_samples, (unsigned)stations[0].detector.state(),
                stations[0].detector_cfg.h0_mm, (unsigned long)stations[0].missed_count);
-        printf("[SERVO1] LM393_DO=%u active=%u stage=%u pulse=%u us (HOME=%u PUSH=%u) push_ms=%lu miss=%lu\n",
-               (unsigned)lm393Raw(), (unsigned)lm393Active(), (unsigned)stations[0].servo_gate.stage,
-               (unsigned)stations[0].servo_us, (unsigned)SERVO_HOME_US, (unsigned)SERVO_PUSH_US,
-               (unsigned long)stations[0].servo_gate.push_ms, (unsigned long)stations[0].missed_count);
+        for (const Station &s : stations) {
+            printf("[%s SERVO] LM393_DO=%u active=%u stage=%u pulse=%u us (HOME=%u PUSH=%u) push_ms=%lu miss=%lu\n",
+                   s.name, (unsigned)lm393Raw(s), (unsigned)lm393Active(s), (unsigned)s.servo_gate.stage,
+                   (unsigned)s.servo_us, (unsigned)s.servo_home_us, (unsigned)s.servo_push_us,
+                   (unsigned long)s.servo_gate.push_ms, (unsigned long)s.missed_count);
+        }
     } else if (ch == '?' || ch == 'h' || ch == 'H') {
-        printf("[CLI] c=Calib H0 | p=Pause/Run | 1/2=Test T1 servo/T2 solenoid | s=Status | k <l_min> <l_max> <m_min> <m_max> <s1_on> <s1_td> <s2_on> <s2_td> <off>\n");
+        printf("[CLI] c=Calib H0 | p=Pause/Run | 1/2=Test servo | s=Status | k <l_min> <l_max> <m_min> <m_max> <s1_on> 0 <s2_on> 0 <off>\n");
     }
 }
 #endif
@@ -1065,7 +1079,7 @@ int main() {
     printf("   BANG TAI PHAN LOAI TU DONG - Raspberry Pi Pico 2 W   \n");
     printf("=======================================================\n");
 #if USE_SORTER_ENGINE
-    printf("[CLI] c=Calib H0 | p=Pause/Run | 1/2=Test Solenoid | s=Status\n");
+    printf("[CLI] c=Calib H0 | p=Pause/Run | 1/2=Test servo | s=Status\n");
 #endif
 
     for (int i = 0; i < 2; i++) {
@@ -1093,7 +1107,7 @@ int main() {
         cfg.n_samples = MEDIAN_SAMPLES;
         cfg.clear_samples = CLEAR_COUNT;
         cfg.discard_first_edge_sample = true;
-        cfg.use_peak = (i == 0);  // servo station waits on LM393 anyway, so decide on the item's peak height
+        cfg.use_peak = (i == 0);  // giu nguyen cach do cua tung tram
         cfg.max_valid_distance_mm = static_cast<double>(MAX_VALID_RANGE_MM);
         s.detector_cfg = cfg;
         s.detector = sorter_core::ItemDetector(s.detector_cfg);
@@ -1102,7 +1116,10 @@ int main() {
         s.geometry = sorter_core::TriggerGeometry{0.0, 0.0, 0.0, 0.0, 0.0, s.travel_delay_ms};
         s.missed_count = 0;
         s.manual_test_active = false;
-        s.servo = (i == 0);
+        s.servo = true;
+        s.position_pin = (i == 0) ? LM393_1_PIN : LM393_2_PIN;
+        s.servo_home_us = (i == 0) ? SERVO1_HOME_US : SERVO2_HOME_US;
+        s.servo_push_us = (i == 0) ? SERVO1_PUSH_US : SERVO2_PUSH_US;
 #endif
         if (s.servo) servoInit(s); else solenoidInit(s.sol_pin);
         tofInit(s);

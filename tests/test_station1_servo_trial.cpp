@@ -81,6 +81,19 @@ constexpr bool queue_keeps_order_l_m_l() {  // three items in flight before the 
     return r.push == 2 && r.timed_out == 0 && g.q_count == 0;
 }
 
+constexpr bool two_stations_keep_separate_queues() {
+    Station1TrialGate first = base(), second = base();
+    Run r1, r2;
+    first.enqueue(true, 0);    // L at station 1
+    second.enqueue(false, 0);  // L missed station 1, must pass station 2
+    second.enqueue(true, 10);  // M must still push at station 2
+    run(first, r1, 0, 800, 100, 250);
+    run(second, r2, 0, 400, 100, 200);
+    run(second, r2, 400, 1000, 500, 600);
+    return r1.push == 1 && r1.passed == 0 && first.q_count == 0 &&
+           r2.push == 1 && r2.passed == 1 && r2.timed_out == 0 && second.q_count == 0;
+}
+
 constexpr bool lm393_never_arrives_times_out() {
     Station1TrialGate g = base();
     Run r;
@@ -150,6 +163,7 @@ static_assert(l_pushes_once_with_set_timings());
 static_assert(lm393_before_tof_decision_still_pushes());
 static_assert(s_m_pass_without_push());
 static_assert(queue_keeps_order_l_m_l());
+static_assert(two_stations_keep_separate_queues());
 static_assert(lm393_never_arrives_times_out());
 static_assert(lm393_noise_is_ignored());
 static_assert(item_without_tof_decision_is_unmatched());

@@ -1,5 +1,13 @@
 # Lỗi và khác biệt cấu hình đã xác nhận
 
+## HW-03 — GP10/GP11 chung PWM slice và hàng đợi trạm 2 (2026-11-26)
+
+- Base commit: `b48a6e8`; bản sửa đang ở working tree.
+- Nguyên nhân: khởi tạo PWM riêng trên GP11 reset cả slice của GP10; nhánh `Missed` (L lọt đến trạm 2) không ghi quyết định đi qua vào FIFO, làm lệch phôi kế tiếp.
+- Ảnh hưởng: servo trạm 1 có thể giật khi khởi động trạm 2; trạm 2 có thể đẩy nhầm M sau một phôi L lọt qua.
+- Sửa: cấu hình PWM slice một lần, mỗi trạm giữ kênh/LM393/gate riêng, đưa `Missed` vào FIFO dưới dạng không đẩy.
+- Gate 0: `arm-none-eabi-g++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only tests/test_station1_servo_trial.cpp`; build target `BangTaiPhanLoai`, rồi kiểm tra vật lý từng servo/LM393.
+
 ## HW-01 — Hai mẫu cách nhau 2–3 cm chỉ gạt mẫu đầu (2026-11-25)
 
 - Base commit: `f56f416`; đã sửa trong `sorter_fsm.h`, `main.cpp`.

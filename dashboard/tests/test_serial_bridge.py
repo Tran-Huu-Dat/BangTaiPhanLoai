@@ -65,6 +65,8 @@ class SerialBridgeTests(unittest.TestCase):
             "mode": st.mode,
         })
         self.assertEqual(ack.result, "executed")
+        self.assertTrue(st.parse_line("[TRAM2] TEST: servo day (2500 us)"))
+        self.assertEqual(st.stations[2]["push_count"], 1)
 
     def test_offline_pico_wifi_scan_and_provision_uf2(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,12 +147,17 @@ class SerialBridgeTests(unittest.TestCase):
             "m_min_mm": 8,
             "m_max_mm": 18,
             "station_1_on_ms": 250,
-            "station_1_delay_ms": 15,
+            "station_1_delay_ms": 0,
             "station_2_on_ms": 300,
-            "station_2_delay_ms": 40,
+            "station_2_delay_ms": 0,
             "min_off_ms": 120,
         })
-        self.assertEqual(cmd, b"k 24.0 90.5 8.0 18.0 250 15 300 40 120\n")
+        self.assertEqual(cmd, b"k 24.0 90.5 8.0 18.0 250 0 300 0 120\n")
+        self.assertIsNone(format_config_command({
+            "l_min_mm": 24, "l_max_mm": 90.5, "m_min_mm": 8, "m_max_mm": 18,
+            "station_1_on_ms": 250, "station_1_delay_ms": 15,
+            "station_2_on_ms": 300, "station_2_delay_ms": 0, "min_off_ms": 120,
+        }))
         self.assertIsNone(format_config_command({
             "l_min_mm": 30,
             "l_max_mm": 25,

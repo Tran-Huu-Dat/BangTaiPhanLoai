@@ -49,9 +49,9 @@ class StationConfigInput(BaseModel):
     m_min_mm: float = Field(ge=0.0, le=299.0)
     m_max_mm: float = Field(ge=1.0, le=300.0)
     station_1_on_ms: int = Field(ge=50, le=600)
-    station_1_delay_ms: int = Field(ge=0, le=3000)
+    station_1_delay_ms: int = Field(ge=0, le=0)
     station_2_on_ms: int = Field(ge=50, le=600)
-    station_2_delay_ms: int = Field(ge=0, le=3000)
+    station_2_delay_ms: int = Field(ge=0, le=0)
     min_off_ms: int = Field(ge=40, le=500)
 
     @model_validator(mode="after")

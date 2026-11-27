@@ -1,34 +1,38 @@
 # BangTaiPhanLoai
 
-Băng tải phân loại dùng Raspberry Pi Pico 2 W và hai solenoid qua L298N.
-Bản C++ (`main.cpp`) dùng cảm biến VL53L1X; bản MicroPython
-(`main_micropython.py`) dùng VL53L0X. Chọn bản đúng với cảm biến thực tế.
+Bản firmware C++ (`main.cpp`) dùng Pico 2 W, hai ToF VL53L1X, hai servo đẩy
+và hai LM393 xác nhận phôi đến vị trí đẩy. Trạm 1 đẩy L, trạm 2 đẩy M;
+S đi thẳng. Bản MicroPython (`main_micropython.py`) dùng VL53L0X và sơ đồ
+chân riêng; không dùng sơ đồ dưới đây cho bản đó.
 
-| Trạm | Phôi | Khoảng cách từ cảm biến tới mặt phôi | Thời gian kích |
-| --- | --- | --- | --- |
-| 1 | M | 65–75 mm, gồm hai đầu mút | 500 ms rồi nhả |
-| 2 | L | 50–60 mm, gồm hai đầu mút | 500 ms rồi nhả |
+## Sơ đồ chân firmware C++
 
-Size S nằm ngoài hai khoảng nhận nên đi qua cả hai trạm. Mặt băng tải không
-có phôi đo được 85–90 mm nên không kích solenoid. Đây là khoảng cách đo,
-không phải chiều cao phôi.
+| Pico 2 W | Thiết bị | Tín hiệu |
+| --- | --- | --- |
+| GP0 (chân 1) | ToF trạm 1 | SDA, I2C0 |
+| GP1 (chân 2) | ToF trạm 1 | SCL, I2C0 |
+| GP6 (chân 9) | ToF trạm 2 | SDA, I2C1 |
+| GP7 (chân 10) | ToF trạm 2 | SCL, I2C1 |
+| GP10 (chân 14) | Servo trạm 1 | Tín hiệu PWM 50 Hz |
+| GP11 (chân 15) | Servo trạm 2 | Tín hiệu PWM 50 Hz; tháo dây L298N IN3 cũ |
+| GP12 (chân 16) | LM393 trạm 1 | DO |
+| GP13 (chân 17) | LM393 trạm 2 | DO |
+| 3V3(OUT) (chân 36) | Hai ToF, LM393 nếu tương thích 3,3 V | VCC |
+| GND (ví dụ chân 13/18) | Tất cả cảm biến và nguồn servo | Mass chung |
 
-Mỗi trạm cần 2 mẫu đo liên tiếp trong khoảng nhận mới kích, không có trễ
-di chuyển. Sau khi kích, trạm phải nhận 2 mẫu hợp lệ liên tiếp từ 80 mm
-trở lên (thấy lại mặt băng tải) mới sẵn sàng nhận phôi tiếp theo. Mẫu lỗi
-không mở khóa lượt đẩy mới. Hai trạm hoạt động độc lập.
+Hai servo dùng nguồn 5 V ngoài đủ dòng, **không** lấy điện từ GP10/GP11 hoặc
+3V3 của Pico. Nối GND nguồn servo với GND Pico. Nếu LM393 cấp 5 V và DO có
+thể lên 5 V, phải hạ mức DO xuống 3,3 V trước GP12/GP13; không đưa 5 V vào
+GPIO Pico. Chân LPN/XSHUT của ToF giữ HIGH ở 3,3 V như cấu hình hiện tại.
 
-## Kết nối L298N
-
-- GP10 → IN1; solenoid trạm 1 nối giữa OUT1 và OUT2.
-- GP11 → IN3; solenoid trạm 2 nối giữa OUT3 và OUT4.
-- IN2 và IN4 giữ LOW (nối GND); ENA và ENB bật (giữ jumper enable nếu module có).
-- Nối chung GND giữa Pico, L298N và nguồn solenoid; cấp nguồn công suất
-  phù hợp với solenoid vào L298N.
-
-Theo cách nối này, GP10/GP11 HIGH cấp điện cho solenoid, LOW ngắt kích.
-Cách chuyển động khi cấp điện phụ thuộc cơ cấu solenoid thực tế.
-Tham khảo [datasheet L298 của ST](https://www.st.com/resource/en/datasheet/l298.pdf).
+ToF chốt kích thước; mỗi LM393 ghép phôi theo thứ tự đã đo và kích servo nếu
+trạm đó cần đẩy. Mặc định servo HOME=1500 µs, PUSH=2500 µs, giữ PUSH 220 ms,
+hồi 150 ms. Hiệu chỉnh riêng `SERVO1_HOME_US`/`SERVO1_PUSH_US` và
+`SERVO2_HOME_US`/`SERVO2_PUSH_US` trong `main.cpp` khi chưa gắn tay đẩy;
+đảm bảo cơ cấu không chạm điểm chặn. Nếu LM393 tác động mức HIGH, đổi
+`LM393_ACTIVE_LOW` thành 0. Thời gian đẩy chỉnh trên dashboard 50–600 ms;
+độ trễ gạt luôn 0 vì LM393 xác nhận vị trí. Khi dừng hoặc mất ToF, servo
+được ra lệnh về HOME; firmware không có cảm biến xác nhận servo đã hồi.
 
 ## Build và nạp
 
@@ -37,6 +41,6 @@ Firmware được tạo tại `build/BangTaiPhanLoai.uf2`; bản sao ở thư m�
 là `BangTaiPhanLoai.uf2`. Giữ BOOTSEL khi cắm Pico rồi chép firmware mới
 vào ổ BOOTSEL để áp dụng cấu hình.
 
-Thử phôi S, M, L thực tế để xác nhận các khoảng đo và hành trình đẩy 500 ms.
-Có thể kiểm tra mô phỏng logic MicroPython trên máy tính bằng
-`py -3.11 -m unittest discover -s tests -v` (không cần gắn phần cứng).
+Thử riêng từng servo khi tháo tay đẩy, rồi thử phôi S, M, L trên băng tải để
+chỉnh ngưỡng chiều cao và thời gian đẩy. Test logic gate trên máy tính:
+`g++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only tests/test_station1_servo_trial.cpp`.

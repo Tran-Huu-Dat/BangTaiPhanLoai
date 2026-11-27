@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// Station 1 servo pusher gate (shared by main firmware and TestServoTram1).
+// Servo pusher gate; each station owns its own instance.
 // ToF decisions (push / pass) go into a FIFO as soon as each item is measured. Every item the
 // LM393 confirms at the pusher (debounced) consumes the oldest decision: push -> servo PUSH for
 // push_ms, HOME, recover_ms for the retract; pass -> nothing. A consumed item must leave the LM393
